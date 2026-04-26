@@ -36,6 +36,7 @@ const routerMap = {
   token: '/console/token',
   redemption: '/console/redemption',
   topup: '/console/topup',
+  invite: '/console/invite',
   user: '/console/user',
   subscription: '/console/subscription',
   log: '/console/log',
@@ -128,6 +129,11 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('钱包管理'),
         itemKey: 'topup',
         to: '/topup',
+      },
+      {
+        text: t('邀请奖励'),
+        itemKey: 'invite',
+        to: '/console/invite',
       },
       {
         text: t('个人设置'),

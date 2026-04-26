@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useContext, useEffect, useState, useRef } from 'react';
 import { Button, Col, Form, Row, Spin } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import {
@@ -27,15 +27,18 @@ import {
   showSuccess,
   showWarning,
 } from '../../../helpers';
+import { StatusContext } from '../../../context/Status';
 
 export default function SettingsCreditLimit(props) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
+  const [statusState, statusDispatch] = useContext(StatusContext);
   const [inputs, setInputs] = useState({
     QuotaForNewUser: '',
     PreConsumedQuota: '',
     QuotaForInviter: '',
     QuotaForInvitee: '',
+    InviteRebatePercentage: '',
     'quota_setting.enable_free_model_pre_consume': true,
   });
   const refForm = useRef();
@@ -44,6 +47,7 @@ export default function SettingsCreditLimit(props) {
   function onSubmit() {
     const updateArray = compareObjects(inputs, inputsRow);
     if (!updateArray.length) return showWarning(t('你似乎并没有修改什么'));
+    const changedKeys = new Set(updateArray.map((item) => item.key));
     const requestQueue = updateArray.map((item) => {
       let value = '';
       if (typeof inputs[item.key] === 'boolean') {
@@ -66,6 +70,20 @@ export default function SettingsCreditLimit(props) {
             return showError(t('部分保存失败，请重试'));
         }
         showSuccess(t('保存成功'));
+        if (
+          changedKeys.has('InviteRebatePercentage') ||
+          changedKeys.has('QuotaForInviter')
+        ) {
+          statusDispatch({
+            type: 'set',
+            payload: {
+              ...(statusState?.status || {}),
+              invite_rebate_percentage:
+                Number.parseFloat(inputs.InviteRebatePercentage) || 0,
+              quota_for_inviter: Number.parseFloat(inputs.QuotaForInviter) || 0,
+            },
+          });
+        }
         props.refresh();
       })
       .catch(() => {
@@ -162,6 +180,26 @@ export default function SettingsCreditLimit(props) {
                     setInputs({
                       ...inputs,
                       QuotaForInvitee: String(value),
+                    })
+                  }
+                />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={8} xl={6}>
+                <Form.InputNumber
+                  label={t('当前返佣比例')}
+                  field={'InviteRebatePercentage'}
+                  step={0.1}
+                  min={0}
+                  suffix={'%'}
+                  extraText={t('用于邀请奖励说明展示')}
+                  placeholder={t('例如：10')}
+                  onChange={(value) =>
+                    setInputs({
+                      ...inputs,
+                      InviteRebatePercentage:
+                        value === undefined || value === null
+                          ? ''
+                          : String(value),
                     })
                   }
                 />
