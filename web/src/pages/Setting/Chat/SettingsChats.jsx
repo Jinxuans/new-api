@@ -55,6 +55,7 @@ export default function SettingsChats(props) {
   const [loading, setLoading] = useState(false);
   const [inputs, setInputs] = useState({
     Chats: '[]',
+    CreationLink: '',
   });
   const refForm = useRef();
   const [inputsRow, setInputsRow] = useState(inputs);
@@ -385,6 +386,29 @@ export default function SettingsChats(props) {
               '链接中的{key}将自动替换为sk-xxxx，{address}将自动替换为系统设置的服务器地址，末尾不带/和/v1',
             )}
           />
+
+          <Form
+            values={inputs}
+            style={{ marginTop: 16 }}
+            getFormApi={(formAPI) => {
+              if (!refForm.current) refForm.current = formAPI;
+            }}
+          >
+            <Form.Input
+              label={t('创作链接')}
+              extraText={t(
+                '创作菜单会使用此链接打开。支持{key}、{address}、{cherryConfig}、{aionuiConfig}占位符。',
+              )}
+              placeholder={t('请输入创作链接')}
+              field={'CreationLink'}
+              onChange={(value) =>
+                setInputs({
+                  ...inputs,
+                  CreationLink: value,
+                })
+              }
+            />
+          </Form>
 
           <Divider />
 
