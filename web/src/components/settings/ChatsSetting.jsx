@@ -26,6 +26,7 @@ const ChatsSetting = () => {
   let [inputs, setInputs] = useState({
     /* 聊天设置 */
     Chats: '[]',
+    CreationLink: '',
   });
 
   let [loading, setLoading] = useState(false);

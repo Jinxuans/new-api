@@ -25,10 +25,20 @@ import { ChevronLeft } from 'lucide-react';
 import { useSidebarCollapsed } from '../../hooks/common/useSidebarCollapsed';
 import { useSidebar } from '../../hooks/common/useSidebar';
 import { useMinimumLoadingTime } from '../../hooks/common/useMinimumLoadingTime';
-import { isAdmin, isRoot, showError } from '../../helpers';
+import {
+  API,
+  encodeToBase64,
+  fetchTokenKey,
+  getServerAddress,
+  isAdmin,
+  isRoot,
+  showError,
+} from '../../helpers';
 import SkeletonWrapper from './components/SkeletonWrapper';
 
-import { Nav, Divider, Button } from '@douyinfe/semi-ui';
+import { Nav, Divider, Button, Modal, Select } from '@douyinfe/semi-ui';
+
+const CREATION_DEFAULT_TOKEN_ID_KEY = 'creation_default_token_id';
 
 const routerMap = {
   home: '/',
@@ -68,6 +78,11 @@ const SiderBar = ({ onNavigate = () => {} }) => {
   const [openedKeys, setOpenedKeys] = useState([]);
   const location = useLocation();
   const [routerMapState, setRouterMapState] = useState(routerMap);
+  const [creationTokenModalVisible, setCreationTokenModalVisible] =
+    useState(false);
+  const [creationTokens, setCreationTokens] = useState([]);
+  const [selectedCreationTokenId, setSelectedCreationTokenId] = useState();
+  const [creationLoading, setCreationLoading] = useState(false);
 
   const workspaceItems = useMemo(() => {
     const items = [
@@ -218,6 +233,10 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         itemKey: 'chat',
         items: chatItems,
       },
+      {
+        text: t('创作'),
+        itemKey: 'creation',
+      },
     ];
 
     // 根据配置过滤项目
@@ -228,6 +247,150 @@ const SiderBar = ({ onNavigate = () => {} }) => {
 
     return filteredItems;
   }, [chatItems, t, isModuleVisible]);
+
+  const getCreationLink = () => {
+    try {
+      const status = JSON.parse(localStorage.getItem('status') || '{}');
+      return typeof status.creation_link === 'string'
+        ? status.creation_link.trim()
+        : '';
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const buildCreationLink = (chatLink, fullKey) => {
+    const serverAddress = getServerAddress();
+    if (chatLink.includes('{cherryConfig}')) {
+      const cherryConfig = {
+        id: 'new-api',
+        baseUrl: serverAddress,
+        apiKey: `sk-${fullKey}`,
+      };
+      return chatLink.replaceAll(
+        '{cherryConfig}',
+        encodeURIComponent(encodeToBase64(JSON.stringify(cherryConfig))),
+      );
+    }
+    if (chatLink.includes('{aionuiConfig}')) {
+      const aionuiConfig = {
+        platform: 'new-api',
+        baseUrl: serverAddress,
+        apiKey: `sk-${fullKey}`,
+      };
+      return chatLink.replaceAll(
+        '{aionuiConfig}',
+        encodeURIComponent(encodeToBase64(JSON.stringify(aionuiConfig))),
+      );
+    }
+
+    return chatLink
+      .replaceAll('{address}', encodeURIComponent(serverAddress))
+      .replaceAll('{key}', `sk-${fullKey}`);
+  };
+
+  const loadActiveTokens = async () => {
+    const res = await API.get('/api/token/?p=1&size=100');
+    const { success, data, message } = res.data || {};
+    if (!success) {
+      throw new Error(message || t('获取令牌失败'));
+    }
+    const tokenItems = Array.isArray(data) ? data : data?.items || [];
+    return tokenItems.filter((token) => token.status === 1);
+  };
+
+  const openCreationWithToken = async (tokenId, targetWindow) => {
+    const creationLink = getCreationLink();
+    if (!creationLink) {
+      targetWindow?.close?.();
+      showError(t('请联系管理员配置创作链接'));
+      return;
+    }
+
+    const fullKey = await fetchTokenKey(tokenId);
+    const url = buildCreationLink(creationLink, fullKey);
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = url;
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  const showCreateCreationTokenPrompt = () => {
+    Modal.info({
+      title: t('请创建创作专用令牌'),
+      content: t('当前没有可用的启用令牌，请先创建一个创作专用令牌。'),
+      okText: t('去创建'),
+      cancelText: t('取消'),
+      onOk: () => {
+        window.location.href = '/console/token';
+      },
+      hasCancel: true,
+    });
+  };
+
+  const handleCreationClick = async () => {
+    const targetWindow = window.open('about:blank', '_blank');
+    if (targetWindow) {
+      targetWindow.opener = null;
+    }
+    setCreationLoading(true);
+    try {
+      const tokens = await loadActiveTokens();
+      if (tokens.length === 0) {
+        targetWindow?.close?.();
+        showCreateCreationTokenPrompt();
+        return;
+      }
+
+      const defaultTokenId = Number(
+        localStorage.getItem(CREATION_DEFAULT_TOKEN_ID_KEY),
+      );
+      const defaultToken = tokens.find((token) => token.id === defaultTokenId);
+      if (defaultToken) {
+        await openCreationWithToken(defaultToken.id, targetWindow);
+        onNavigate();
+        return;
+      }
+
+      targetWindow?.close?.();
+      setCreationTokens(tokens);
+      setSelectedCreationTokenId(tokens[0]?.id);
+      setCreationTokenModalVisible(true);
+    } catch (error) {
+      targetWindow?.close?.();
+      showError(error.message || t('打开创作失败'));
+    } finally {
+      setCreationLoading(false);
+    }
+  };
+
+  const handleConfirmCreationToken = async () => {
+    if (!selectedCreationTokenId) {
+      showError(t('请选择一个令牌'));
+      return;
+    }
+
+    const targetWindow = window.open('about:blank', '_blank');
+    if (targetWindow) {
+      targetWindow.opener = null;
+    }
+    setCreationLoading(true);
+    try {
+      localStorage.setItem(
+        CREATION_DEFAULT_TOKEN_ID_KEY,
+        String(selectedCreationTokenId),
+      );
+      await openCreationWithToken(selectedCreationTokenId, targetWindow);
+      setCreationTokenModalVisible(false);
+      onNavigate();
+    } catch (error) {
+      targetWindow?.close?.();
+      showError(error.message || t('打开创作失败'));
+    } finally {
+      setCreationLoading(false);
+    }
+  };
 
   // 更新路由映射，添加聊天路由
   const updateRouterMapWithChats = (chats) => {
@@ -416,6 +579,26 @@ const SiderBar = ({ onNavigate = () => {} }) => {
           hoverStyle='sidebar-nav-item:hover'
           selectedStyle='sidebar-nav-item-selected'
           renderWrapper={({ itemElement, props }) => {
+            if (props.itemKey === 'creation') {
+              return (
+                <button
+                  type='button'
+                  onClick={handleCreationClick}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: 0,
+                    border: 0,
+                    background: 'transparent',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {itemElement}
+                </button>
+              );
+            }
+
             const to =
               routerMapState[props.itemKey] || routerMap[props.itemKey];
 
@@ -531,6 +714,31 @@ const SiderBar = ({ onNavigate = () => {} }) => {
           </Button>
         </SkeletonWrapper>
       </div>
+
+      <Modal
+        title={t('选择默认创作令牌')}
+        visible={creationTokenModalVisible}
+        confirmLoading={creationLoading}
+        onOk={handleConfirmCreationToken}
+        onCancel={() => setCreationTokenModalVisible(false)}
+        okText={t('打开创作')}
+        cancelText={t('取消')}
+      >
+        <div className='mb-3'>
+          {t('首次使用创作需要选择一个默认令牌，之后会自动使用该令牌打开。')}
+        </div>
+        <Select
+          style={{ width: '100%' }}
+          value={selectedCreationTokenId}
+          onChange={setSelectedCreationTokenId}
+          optionList={creationTokens.map((token) => ({
+            label: token.name || `#${token.id}`,
+            value: token.id,
+          }))}
+          placeholder={t('请选择一个令牌')}
+          emptyContent={t('暂无数据')}
+        />
+      </Modal>
     </div>
   );
 };
