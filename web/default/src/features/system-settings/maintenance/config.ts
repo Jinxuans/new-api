@@ -36,6 +36,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
   chat: {
     enabled: true,
     playground: true,
+    creation: true,
     chat: true,
   },
   console: {
@@ -49,6 +50,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
   personal: {
     enabled: true,
     topup: true,
+    invite: true,
     personal: true,
   },
   admin: {

@@ -22,6 +22,7 @@ import { formatJsonForEditor, normalizeJsonString } from './utils'
 
 const createChatSchema = (t: (key: string) => string) =>
   z.object({
+    CreationLink: z.string().url().optional().or(z.literal('')),
     Chats: z.string().superRefine((value, ctx) => {
       try {
         const parsed = JSON.parse(value || '[]')
@@ -68,10 +69,12 @@ type ChatSettingsFormValues = z.infer<ReturnType<typeof createChatSchema>>
 
 type ChatSettingsSectionProps = {
   defaultValue: string
+  creationLink: string
 }
 
 export function ChatSettingsSection({
   defaultValue,
+  creationLink,
 }: ChatSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
@@ -84,26 +87,42 @@ export function ChatSettingsSection({
     mode: 'onChange', // Enable real-time validation
     defaultValues: {
       Chats: formatted,
+      CreationLink: creationLink,
     },
   })
 
   const initialNormalizedRef = useRef(normalizeJsonString(defaultValue, '[]'))
+  const initialCreationLinkRef = useRef(creationLink)
 
   useEffect(() => {
-    form.reset({ Chats: formatJsonForEditor(defaultValue, '[]') })
+    form.reset({
+      Chats: formatJsonForEditor(defaultValue, '[]'),
+      CreationLink: creationLink,
+    })
     initialNormalizedRef.current = normalizeJsonString(defaultValue, '[]')
-  }, [defaultValue, form])
+    initialCreationLinkRef.current = creationLink
+  }, [defaultValue, creationLink, form])
 
   const onSubmit = async (values: ChatSettingsFormValues) => {
     const normalized = normalizeJsonString(values.Chats, '[]')
-    if (normalized === initialNormalizedRef.current) {
+    const creationLinkValue = values.CreationLink || ''
+    const updates: Array<{ key: string; value: string }> = []
+
+    if (normalized !== initialNormalizedRef.current) {
+      updates.push({ key: 'Chats', value: normalized })
+    }
+
+    if (creationLinkValue !== initialCreationLinkRef.current) {
+      updates.push({ key: 'CreationLink', value: creationLinkValue })
+    }
+
+    if (updates.length === 0) {
       return
     }
 
-    await updateOption.mutateAsync({
-      key: 'Chats',
-      value: normalized,
-    })
+    for (const update of updates) {
+      await updateOption.mutateAsync(update)
+    }
   }
 
   return (
@@ -168,6 +187,29 @@ export function ChatSettingsSection({
               />
             </TabsContent>
           </Tabs>
+
+          <FormField
+            control={form.control}
+            name='CreationLink'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Creation Link')}</FormLabel>
+                <FormControl>
+                  <Textarea
+                    rows={3}
+                    placeholder={t('https://example.com/?key={key}')}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'The Creation sidebar entry opens this link. Supports {key}, {address}, {cherryConfig}, and {aionuiConfig} placeholders.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
 
           <Button type='submit' disabled={updateOption.isPending}>
             {updateOption.isPending ? t('Saving...') : t('Save chat settings')}

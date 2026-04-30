@@ -8,6 +8,7 @@ import {
   updateLastAssistantMessage,
   processStreamingContent,
   finalizeMessage,
+  contentToTextWithImages,
 } from '../lib'
 import type { Message, PlaygroundConfig, ParameterEnabled } from '../types'
 import { useStreamRequest } from './use-stream-request'
@@ -124,14 +125,17 @@ export function useChatHandler({
         onMessageUpdate((prev) =>
           updateLastAssistantMessage(prev, (message) => ({
             ...finalizeMessage(
-              {
-                ...message,
-                versions: [
                   {
-                    ...message.versions[0],
-                    content: choice.message?.content || '',
-                  },
-                ],
+                    ...message,
+                    versions: [
+                      {
+                        ...message.versions[0],
+                        content: contentToTextWithImages(
+                          choice.message?.content,
+                          choice.message?.images
+                        ),
+                      },
+                    ],
               },
               choice.message?.reasoning_content
             ),

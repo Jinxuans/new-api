@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Download, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Branch,
@@ -37,6 +44,18 @@ import type { Message as MessageType } from '../types'
 import { MessageActions } from './message-actions'
 import { MessageError } from './message-error'
 
+function extractMarkdownImages(content: string) {
+  const urls: string[] = []
+  const text = content.replace(
+    /!\[[^\]]*]\(([^)]+)\)/g,
+    (_match, url: string) => {
+      if (url?.trim()) urls.push(url.trim())
+      return ''
+    }
+  )
+  return { text: text.trim(), urls }
+}
+
 interface PlaygroundChatProps {
   messages: MessageType[]
   onCopyMessage?: (message: MessageType) => void
@@ -64,6 +83,7 @@ export function PlaygroundChat({
 }: PlaygroundChatProps) {
   const [editText, setEditText] = useState('')
   const [originalText, setOriginalText] = useState('')
+  const [previewImageUrl, setPreviewImageUrl] = useState('')
 
   useEffect(() => {
     if (!editingKey) return
@@ -81,8 +101,20 @@ export function PlaygroundChat({
     () => editText !== originalText,
     [editText, originalText]
   )
+  const downloadPreviewImage = () => {
+    if (!previewImageUrl) return
+    const link = document.createElement('a')
+    link.href = previewImageUrl
+    link.download = `playground-image-${Date.now()}.png`
+    link.rel = 'noopener'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
-    <Conversation>
+    <>
+      <Conversation>
       {/* Remove outer padding; apply padding to inner centered container to align with input */}
       <ConversationContent className='p-0'>
         <div className='mx-auto w-full max-w-4xl px-4 py-4'>
@@ -161,6 +193,8 @@ export function PlaygroundChat({
                               const displayContent = isAssistant
                                 ? parseThinkTags(version.content).visibleContent
                                 : version.content
+                              const imageContent =
+                                extractMarkdownImages(displayContent)
 
                               const actions = (
                                 <MessageActions
@@ -232,13 +266,41 @@ export function PlaygroundChat({
                                   ) : (
                                     showMessageContent && (
                                       <>
+                                        {imageContent.urls.length > 0 && (
+                                          <div className='mb-3 flex flex-wrap gap-3'>
+                                            {imageContent.urls.map(
+                                              (url, index) => (
+                                                <button
+                                                  key={`${url}-${index}`}
+                                                  type='button'
+                                                  className='group relative size-32 overflow-hidden rounded-lg border bg-muted shadow-sm sm:size-40'
+                                                  onClick={() =>
+                                                    setPreviewImageUrl(url)
+                                                  }
+                                                >
+                                                  <img
+                                                    src={url}
+                                                    alt={`Generated image ${index + 1}`}
+                                                    className='size-full object-cover'
+                                                  />
+                                                  <span className='absolute inset-x-0 bottom-0 flex items-center justify-between bg-black/60 px-2 py-1 text-xs text-white opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100'>
+                                                    {`Image ${index + 1}`}
+                                                    <ZoomIn className='size-3.5' />
+                                                  </span>
+                                                </button>
+                                              )
+                                            )}
+                                          </div>
+                                        )}
                                         <MessageContent
                                           variant='flat'
                                           className={cn(
                                             getMessageContentStyles()
                                           )}
                                         >
-                                          <Response>{displayContent}</Response>
+                                          <Response>
+                                            {imageContent.text || displayContent}
+                                          </Response>
                                         </MessageContent>
                                         {actions}
                                       </>
@@ -268,6 +330,40 @@ export function PlaygroundChat({
         </div>
       </ConversationContent>
       <ConversationScrollButton />
-    </Conversation>
+      </Conversation>
+
+      <Dialog
+        open={!!previewImageUrl}
+        onOpenChange={(open) => {
+          if (!open) setPreviewImageUrl('')
+        }}
+      >
+        <DialogContent className='max-w-5xl'>
+          <DialogHeader>
+            <DialogTitle>Image Preview</DialogTitle>
+          </DialogHeader>
+          <div className='flex justify-end'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={downloadPreviewImage}
+            >
+              <Download className='size-4' />
+              Download
+            </Button>
+          </div>
+          {previewImageUrl && (
+            <div className='max-h-[75vh] overflow-auto rounded-lg bg-muted p-2'>
+              <img
+                src={previewImageUrl}
+                alt='Image preview'
+                className='mx-auto max-h-[72vh] w-auto max-w-full rounded-md object-contain'
+              />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

@@ -14,6 +14,8 @@ import {
   MessageSquare,
   CreditCard,
   ListTodo,
+  PenLine,
+  Share2,
   Settings,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -41,6 +43,11 @@ export function useSidebarData(): SidebarData {
             title: t('Playground'),
             url: '/playground',
             icon: FlaskConical,
+          },
+          {
+            title: t('Creation'),
+            url: '/creation',
+            icon: PenLine,
           },
           {
             title: t('Chat'),
@@ -90,6 +97,11 @@ export function useSidebarData(): SidebarData {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,
+          },
+          {
+            title: t('Referral Rewards'),
+            url: '/invite',
+            icon: Share2,
           },
           {
             title: t('Profile'),

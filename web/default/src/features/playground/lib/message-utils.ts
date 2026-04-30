@@ -109,6 +109,56 @@ export function getTextContent(content: string | ContentPart[]): string {
 }
 
 /**
+ * Extract image URLs from mixed content or provider-specific image arrays.
+ */
+export function extractImageUrls(value: unknown): string[] {
+  if (!value) return []
+
+  if (typeof value === 'string') {
+    return value.trim() ? [value.trim()] : []
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => extractImageUrls(item))
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const direct =
+      record.url ||
+      record.image_url ||
+      record.b64_json ||
+      (typeof record.image_url === 'object'
+        ? (record.image_url as Record<string, unknown>).url
+        : undefined)
+    return extractImageUrls(direct)
+  }
+
+  return []
+}
+
+export function contentToTextWithImages(
+  content: string | ContentPart[] | undefined,
+  images?: unknown
+): string {
+  const text = content ? getTextContent(content) : ''
+  const contentImages = Array.isArray(content)
+    ? content.flatMap((part) =>
+        part.type === 'image_url' ? extractImageUrls(part.image_url) : []
+      )
+    : []
+  const imageUrls = [...contentImages, ...extractImageUrls(images)]
+
+  if (imageUrls.length === 0) return text
+
+  const imageMarkdown = imageUrls
+    .map((url, index) => `![Generated image ${index + 1}](${url})`)
+    .join('\n\n')
+
+  return [text, imageMarkdown].filter(Boolean).join('\n\n')
+}
+
+/**
  * Format message for API request
  */
 export function formatMessageForAPI(message: Message): ChatCompletionMessage {

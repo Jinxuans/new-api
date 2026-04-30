@@ -58,6 +58,12 @@ export function useStreamRequest() {
             if (delta.content) {
               onUpdate('content', delta.content)
             }
+            if (delta.images) {
+              const imageMarkdown = normalizeImageMarkdown(delta.images)
+              if (imageMarkdown) {
+                onUpdate('content', imageMarkdown)
+              }
+            }
           }
         } catch (error) {
           // eslint-disable-next-line no-console
@@ -133,4 +139,29 @@ export function useStreamRequest() {
     // eslint-disable-next-line react-hooks/refs
     isStreaming,
   }
+}
+
+function normalizeImageMarkdown(value: unknown): string {
+  const urls = extractImageUrls(value)
+  return urls
+    .map((url, index) => `\n\n![Generated image ${index + 1}](${url})`)
+    .join('')
+}
+
+function extractImageUrls(value: unknown): string[] {
+  if (!value) return []
+  if (typeof value === 'string') return value.trim() ? [value.trim()] : []
+  if (Array.isArray(value)) return value.flatMap((item) => extractImageUrls(item))
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const direct =
+      record.url ||
+      record.image_url ||
+      record.b64_json ||
+      (typeof record.image_url === 'object'
+        ? (record.image_url as Record<string, unknown>).url
+        : undefined)
+    return extractImageUrls(direct)
+  }
+  return []
 }

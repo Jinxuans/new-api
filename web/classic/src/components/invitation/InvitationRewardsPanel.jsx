@@ -68,7 +68,7 @@ const InvitationRewardsPanel = ({ className = '' }) => {
     const quota = Number.parseFloat(statusState?.status?.quota_for_inviter);
     const safeQuota = Number.isFinite(quota) ? quota : 0;
     return renderQuota(safeQuota);
-  }, [renderQuota, statusState?.status?.quota_for_inviter]);
+  }, [statusState?.status?.quota_for_inviter]);
 
   const getUserQuota = async () => {
     const res = await API.get('/api/user/self');

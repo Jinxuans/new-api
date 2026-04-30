@@ -85,7 +85,10 @@ const CONTENT_SECTIONS = [
     titleKey: 'Chat Presets',
     descriptionKey: 'Configure chat-related settings',
     build: (settings: ContentSettings) => (
-      <ChatSettingsSection defaultValue={settings.Chats} />
+      <ChatSettingsSection
+        defaultValue={settings.Chats}
+        creationLink={settings.CreationLink}
+      />
     ),
   },
   {

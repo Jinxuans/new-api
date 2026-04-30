@@ -47,6 +47,11 @@ export function SidebarModulesCard() {
           description: t('AI model testing environment'),
         },
         {
+          key: 'creation',
+          title: t('Creation'),
+          description: t('Open the configured creation app'),
+        },
+        {
           key: 'chat',
           title: t('Chat'),
           description: t('Chat session management'),
@@ -94,6 +99,11 @@ export function SidebarModulesCard() {
           key: 'topup',
           title: t('Wallet Management'),
           description: t('Balance and top-up management'),
+        },
+        {
+          key: 'invite',
+          title: t('Referral Rewards'),
+          description: t('Referral links and rewards management'),
         },
         {
           key: 'personal',

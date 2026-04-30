@@ -64,6 +64,12 @@ export function SidebarModulesSection({
         title: t('Playground'),
         description: t('Experiment with prompts and models in real time.'),
       },
+      creation: {
+        title: t('Creation'),
+        description: t(
+          'Open the configured creation app with a selected API key.'
+        ),
+      },
       chat: {
         title: t('Chat'),
         description: t('Access previous conversations and start new ones.'),
@@ -95,6 +101,10 @@ export function SidebarModulesSection({
       topup: {
         title: t('Wallet'),
         description: t('Top up balance and view billing history.'),
+      },
+      invite: {
+        title: t('Referral Rewards'),
+        description: t('Manage referral links and accumulated rewards.'),
       },
       personal: {
         title: t('Profile'),

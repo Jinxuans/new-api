@@ -62,6 +62,7 @@ export interface ChatCompletionChunk {
       role?: MessageRole
       content?: string
       reasoning_content?: string
+      images?: unknown
     }
     finish_reason: string | null
   }>
@@ -76,8 +77,9 @@ export interface ChatCompletionResponse {
     index: number
     message: {
       role: MessageRole
-      content: string
+      content: string | ContentPart[]
       reasoning_content?: string
+      images?: unknown
     }
     finish_reason: string
   }>
