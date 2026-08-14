@@ -25,11 +25,19 @@ import {
 } from './utils';
 import axios from 'axios';
 import { MESSAGE_ROLES } from '../constants/playground.constants';
+import {
+  clearUserData,
+  getDashboardAccessToken,
+  getDashboardSessionId,
+  getStoredUser,
+  storeUserData,
+} from './authSession';
+
+const apiBaseURL = import.meta.env.VITE_REACT_APP_SERVER_URL || '';
 
 export let API = axios.create({
-  baseURL: import.meta.env.VITE_REACT_APP_SERVER_URL
-    ? import.meta.env.VITE_REACT_APP_SERVER_URL
-    : '',
+  baseURL: apiBaseURL,
+  withCredentials: true,
   headers: {
     'New-API-User': getUserIdFromLocalStorage(),
     'Cache-Control': 'no-store',
@@ -81,30 +89,89 @@ function patchAPIInstance(instance) {
 patchAPIInstance(API);
 
 export function updateAPI() {
-  API = axios.create({
-    baseURL: import.meta.env.VITE_REACT_APP_SERVER_URL
-      ? import.meta.env.VITE_REACT_APP_SERVER_URL
-      : '',
-    headers: {
-      'New-API-User': getUserIdFromLocalStorage(),
-      'Cache-Control': 'no-store',
-    },
-  });
+  API.defaults.headers.common['New-API-User'] = getUserIdFromLocalStorage();
+}
 
-  patchAPIInstance(API);
+let refreshPromise = null;
+
+async function refreshAuthentication() {
+  if (!refreshPromise) {
+    const sessionId = getDashboardSessionId();
+    refreshPromise = axios
+      .post(
+        `${apiBaseURL}/api/user/auth/refresh`,
+        {},
+        {
+          withCredentials: true,
+          headers: sessionId ? { 'X-Auth-Session': sessionId } : {},
+        },
+      )
+      .then((response) => {
+        if (!response.data?.success || !response.data?.data?.access_token) {
+          throw new Error('Authentication refresh failed');
+        }
+        return storeUserData(response.data.data);
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+function redirectToLogin() {
+  clearUserData();
+  if (window.location.pathname !== '/login') {
+    window.location.replace('/login?expired=true');
+  }
 }
 
 API.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 如果请求配置中显式要求跳过全局错误处理，则不弹出默认错误提示
-    if (error.config && error.config.skipErrorHandler) {
-      return Promise.reject(error);
+  (response) => {
+    if (response.data?.success && response.data?.data?.access_token) {
+      storeUserData(response.data.data);
     }
-    showError(error);
+    return response;
+  },
+  async (error) => {
+    // 如果请求配置中显式要求跳过全局错误处理，则不弹出默认错误提示
+    const config = error.config;
+    if (
+      error.response?.status === 401 &&
+      getStoredUser() &&
+      config &&
+      !config.skipAuthRefresh &&
+      !config.authRetry
+    ) {
+      config.authRetry = true;
+      try {
+        const user = await refreshAuthentication();
+        config.headers = {
+          ...config.headers,
+          Authorization: `Bearer ${user.access_token}`,
+        };
+        return API.request(config);
+      } catch (refreshError) {
+        redirectToLogin();
+      }
+    } else if (error.response?.status === 401 && config?.authRetry) {
+      redirectToLogin();
+    }
+
+    if (!config?.skipErrorHandler) showError(error);
     return Promise.reject(error);
   },
 );
+
+API.interceptors.request.use((config) => {
+  const token = getDashboardAccessToken();
+  const sessionId = getDashboardSessionId();
+  const userId = getStoredUser()?.id;
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (sessionId) config.headers['X-Auth-Session'] = sessionId;
+  if (userId) config.headers['New-API-User'] = userId;
+  return config;
+});
 
 // playground
 
@@ -239,36 +306,40 @@ export const processGroupsData = (data, userGroup) => {
 
 // 原来components中的utils.js
 
-export async function getOAuthState() {
-  let path = '/api/oauth/state';
-  let affCode = localStorage.getItem('aff');
-  if (affCode && affCode.length > 0) {
-    path += `?aff=${affCode}`;
-  }
-  const res = await API.get(path);
+export async function getOAuthState(provider, intent = 'login') {
+  const affCode = intent === 'login' ? localStorage.getItem('aff') || '' : '';
+  const res = await API.post('/api/oauth/state', {
+    provider,
+    intent,
+    aff: affCode,
+  });
   const { success, message, data } = res.data;
   if (success) {
-    return data;
+    return data.flow_token;
   } else {
     showError(message);
     return '';
   }
 }
 
-async function prepareOAuthState(options = {}) {
+async function prepareOAuthState(provider, options = {}) {
   const { shouldLogout = false } = options;
   if (shouldLogout) {
     try {
-      await API.get('/api/user/logout', { skipErrorHandler: true });
+      await API.post('/api/user/auth/logout', undefined, {
+        skipAuthRefresh: true,
+        skipErrorHandler: true,
+      });
     } catch (err) {}
-    localStorage.removeItem('user');
+    clearUserData();
     updateAPI();
   }
-  return await getOAuthState();
+  const intent = getStoredUser() ? 'bind' : 'login';
+  return await getOAuthState(provider, intent);
 }
 
 export async function onDiscordOAuthClicked(client_id, options = {}) {
-  const state = await prepareOAuthState(options);
+  const state = await prepareOAuthState('discord', options);
   if (!state) return;
   const redirect_uri = `${window.location.origin}/oauth/discord`;
   const response_type = 'code';
@@ -284,7 +355,7 @@ export async function onOIDCClicked(
   openInNewTab = false,
   options = {},
 ) {
-  const state = await prepareOAuthState(options);
+  const state = await prepareOAuthState('oidc', options);
   if (!state) return;
   const url = new URL(auth_url);
   url.searchParams.set('client_id', client_id);
@@ -296,7 +367,7 @@ export async function onOIDCClicked(
 }
 
 export async function onGitHubOAuthClicked(github_client_id, options = {}) {
-  const state = await prepareOAuthState(options);
+  const state = await prepareOAuthState('github', options);
   if (!state) return;
   redirectToOAuthUrl(
     `https://github.com/login/oauth/authorize?client_id=${github_client_id}&state=${state}&scope=user:email`,
@@ -307,7 +378,7 @@ export async function onLinuxDOOAuthClicked(
   linuxdo_client_id,
   options = { shouldLogout: false },
 ) {
-  const state = await prepareOAuthState(options);
+  const state = await prepareOAuthState('linuxdo', options);
   if (!state) return;
   redirectToOAuthUrl(
     `https://connect.linux.do/oauth2/authorize?response_type=code&client_id=${linuxdo_client_id}&state=${state}`,
@@ -325,7 +396,7 @@ export async function onLinuxDOOAuthClicked(
  * @param {boolean} options.shouldLogout - Whether to logout first
  */
 export async function onCustomOAuthClicked(provider, options = {}) {
-  const state = await prepareOAuthState(options);
+  const state = await prepareOAuthState(provider.slug, options);
   if (!state) return;
 
   try {

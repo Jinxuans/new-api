@@ -85,6 +85,10 @@ export const useSecureVerification = ({
   const startVerification = useCallback(
     async (apiCall, options = {}) => {
       const { preferredMethod, title, description } = options;
+      const scope = options.scope || apiCall.securityProofScope;
+      if (!scope) {
+        throw new Error(t('验证配置错误'));
+      }
 
       // 检查验证方式
       const methods = await checkVerificationMethods();
@@ -110,6 +114,7 @@ export const useSecureVerification = ({
         ...prev,
         method: defaultMethod,
         apiCall,
+        scope,
         title,
         description,
       }));
@@ -131,11 +136,13 @@ export const useSecureVerification = ({
       setVerificationState((prev) => ({ ...prev, loading: true }));
 
       try {
-        // 先调用验证 API，成功后后端会设置 session
-        await SecureVerificationService.verify(method, code);
+        const proof = await SecureVerificationService.verify(
+          method,
+          verificationState.scope,
+          code,
+        );
 
-        // 验证成功，调用业务 API（此时中间件会通过）
-        const result = await verificationState.apiCall();
+        const result = await verificationState.apiCall(proof.proof_token);
 
         // 显示成功消息
         if (successMessage) {

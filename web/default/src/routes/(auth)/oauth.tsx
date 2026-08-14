@@ -22,8 +22,9 @@ import { useEffect } from 'react'
 import { toast } from 'sonner'
 
 import { wechatLoginByCode } from '@/features/auth/api'
-import { getSelf } from '@/lib/api'
-import { useAuthStore, type AuthUser } from '@/stores/auth-store'
+import { sanitizeAuthRedirect } from '@/features/auth/lib/auth-redirect'
+import { applyAuthBundle, isAuthBundle } from '@/lib/api'
+import { getServerErrorMessageKey } from '@/lib/server-error-message'
 
 function OAuthComponent() {
   const navigate = useNavigate()
@@ -38,17 +39,25 @@ function OAuthComponent() {
     ;(async () => {
       try {
         if (search?.provider === 'wechat' && search.code) {
-          await wechatLoginByCode(search.code)
+          const res = await wechatLoginByCode(search.code)
+          if (res?.success && isAuthBundle(res.data)) {
+            applyAuthBundle(res.data)
+            const target =
+              sanitizeAuthRedirect(search?.redirect, window.location.origin) ??
+              '/dashboard'
+            navigate({ href: target, replace: true })
+            return
+          }
+          if (getServerErrorMessageKey(res)) {
+            navigate({ to: '/sign-in', replace: true })
+            return
+          }
         }
-        const res = await getSelf()
-        if (res?.success) {
-          useAuthStore.getState().auth.setUser(res.data as AuthUser)
-          const target = search?.redirect || '/dashboard'
-          navigate({ to: target, replace: true })
+      } catch (error: unknown) {
+        if (getServerErrorMessageKey(error)) {
+          navigate({ to: '/sign-in', replace: true })
           return
         }
-      } catch {
-        /* empty */
       }
       toast.error(i18next.t('OAuth failed'))
       navigate({ to: '/sign-in', replace: true })

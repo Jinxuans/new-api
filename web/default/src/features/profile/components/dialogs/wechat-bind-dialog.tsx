@@ -16,61 +16,124 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { QrCode } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { Spinner } from '@/components/ui/spinner'
 
-// ============================================================================
-// WeChat Bind Dialog Component
-// ============================================================================
+import { bindWeChat } from '../../api'
 
 interface WeChatBindDialogProps {
   open: boolean
+  qrCodeUrl: string
   onOpenChange: (open: boolean) => void
   onSuccess: () => void
 }
 
-export function WeChatBindDialog({
-  open,
-  onOpenChange,
-}: WeChatBindDialogProps) {
+export function WeChatBindDialog(props: WeChatBindDialogProps) {
   const { t } = useTranslation()
+  const [verificationCode, setVerificationCode] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleOpenChange = (open: boolean) => {
+    if (submitting) return
+    if (!open) setVerificationCode('')
+    props.onOpenChange(open)
+  }
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const code = verificationCode.trim()
+    if (!code || submitting) return
+
+    setSubmitting(true)
+    try {
+      const response = await bindWeChat(code)
+      if (!response.success) {
+        toast.error(t('Request failed'))
+        return
+      }
+
+      toast.success(t('Binding successful!'))
+      setVerificationCode('')
+      props.onOpenChange(false)
+      props.onSuccess()
+    } catch {
+      toast.error(t('Request failed'))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <Dialog
-      open={open}
-      onOpenChange={onOpenChange}
+      open={props.open}
+      onOpenChange={handleOpenChange}
       title={t('Bind WeChat Account')}
-      description={t('Scan the QR code with WeChat to bind your account')}
-      contentClassName='sm:max-w-md'
+      description={t(
+        'Scan the QR code to follow the official account and reply with “验证码” to receive your verification code.'
+      )}
+      contentClassName='max-w-sm'
       contentHeight='auto'
       bodyClassName='space-y-4'
+      footer={
+        <>
+          <Button
+            type='button'
+            variant='outline'
+            disabled={submitting}
+            onClick={() => handleOpenChange(false)}
+          >
+            {t('Cancel')}
+          </Button>
+          <Button
+            type='submit'
+            form='wechat-bind-form'
+            disabled={submitting || !verificationCode.trim()}
+          >
+            {submitting && <Spinner data-icon='inline-start' />}
+            {t('Bind')}
+          </Button>
+        </>
+      }
     >
-      <div className='space-y-4 py-4'>
-        <Alert>
-          <QrCode className='h-4 w-4' />
-          <AlertDescription>
-            {t(
-              'Please use WeChat\'s "Scan QR Code" feature to complete the binding process.'
-            )}
-          </AlertDescription>
-        </Alert>
+      <form id='wechat-bind-form' onSubmit={handleSubmit}>
+        <FieldGroup>
+          {props.qrCodeUrl ? (
+            <div className='flex justify-center'>
+              <img
+                src={props.qrCodeUrl}
+                alt={t('WeChat login QR code')}
+                className='size-48 rounded-lg border object-contain'
+              />
+            </div>
+          ) : (
+            <p className='text-muted-foreground text-sm'>
+              {t('QR code is not configured. Please contact support.')}
+            </p>
+          )}
 
-        <div className='flex flex-col items-center justify-center rounded-lg border border-dashed p-8'>
-          <QrCode className='text-muted-foreground mb-3 h-16 w-16' />
-          <p className='text-muted-foreground text-sm'>
-            {t('WeChat QR code will be displayed here')}
-          </p>
-          <p className='text-muted-foreground mt-2 text-xs'>
-            {t('This feature requires server-side WeChat configuration')}
-          </p>
-        </div>
-
-        <p className='text-muted-foreground text-center text-xs'>
-          {t('After scanning, the binding will complete automatically')}
-        </p>
-      </div>
+          <Field data-disabled={submitting}>
+            <FieldLabel htmlFor='wechat-bind-code'>
+              {t('Verification code')}
+            </FieldLabel>
+            <Input
+              id='wechat-bind-code'
+              value={verificationCode}
+              onChange={(event) => setVerificationCode(event.target.value)}
+              placeholder={t('Enter the verification code')}
+              autoComplete='one-time-code'
+              disabled={submitting}
+              autoFocus
+            />
+          </Field>
+        </FieldGroup>
+      </form>
     </Dialog>
   )
 }

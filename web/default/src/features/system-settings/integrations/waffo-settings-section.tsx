@@ -308,7 +308,7 @@ export function WaffoSettingsSection({
           <div className='grid gap-1.5'>
             <Label>{t('Payment return URL')}</Label>
             <Input
-              placeholder='https://example.com/console/topup'
+              placeholder='https://example.com/wallet'
               value={values.WaffoReturnUrl}
               onChange={(event) =>
                 onValueChange('WaffoReturnUrl', event.target.value)

@@ -37,6 +37,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
+import { JsonCodeEditor } from '@/components/json-code-editor'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -970,7 +971,6 @@ const validateOperations = (
       if (headers.length === 0)
         return t('Rule {{line}} pass_headers format is invalid', { line })
     }
-
   }
   return ''
 }
@@ -1657,17 +1657,6 @@ export function ParamOverrideEditorDialog(
     [t]
   )
 
-  const formatJson = useCallback(() => {
-    const trimmed = jsonText.trim()
-    if (!trimmed) return
-    if (!verifyJSON(trimmed)) {
-      toast.error(t('Parameter override must be valid JSON format'))
-      return
-    }
-    setJsonText(JSON.stringify(JSON.parse(trimmed), null, 2))
-    setJsonError('')
-  }, [jsonText, t])
-
   const visualValidationError = useMemo(() => {
     if (editMode !== 'visual') return ''
     try {
@@ -1833,12 +1822,12 @@ export function ParamOverrideEditorDialog(
               <p className='text-muted-foreground mb-2 text-sm'>
                 {t('Legacy Format (JSON Object)')}
               </p>
-              <Textarea
+              <JsonCodeEditor
                 value={legacyValue}
-                onChange={(e) => setLegacyValue(e.target.value)}
+                onChange={setLegacyValue}
                 placeholder={JSON.stringify(LEGACY_TEMPLATE, null, 2)}
-                rows={14}
-                className='font-mono text-xs'
+                heightClassName='h-72 min-h-72 max-h-72'
+                ariaLabel={t('Legacy Format (JSON Object)')}
               />
               <p className='text-muted-foreground mt-2 text-xs'>
                 {t(
@@ -2045,24 +2034,17 @@ export function ParamOverrideEditorDialog(
           /* JSON mode */
           <div className='p-4'>
             <div className='mb-2 flex items-center gap-2'>
-              <Button
-                type='button'
-                variant='outline'
-                size='sm'
-                onClick={formatJson}
-              >
-                {t('Format')}
-              </Button>
               <span className='text-muted-foreground text-xs'>
                 {t('Advanced text editing')}
               </span>
             </div>
-            <Textarea
+            <JsonCodeEditor
               value={jsonText}
-              onChange={(e) => handleJsonChange(e.target.value)}
+              onChange={handleJsonChange}
               placeholder={JSON.stringify(OPERATION_TEMPLATE, null, 2)}
-              rows={20}
-              className='font-mono text-xs'
+              heightClassName='h-[420px] min-h-[420px] max-h-[420px]'
+              aria-invalid={Boolean(jsonError)}
+              ariaLabel={t('Advanced text editing')}
             />
             <p className='text-muted-foreground mt-2 text-xs'>
               {t('Edit JSON text directly. Format will be validated on save.')}

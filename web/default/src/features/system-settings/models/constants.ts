@@ -27,8 +27,8 @@ export const DEFAULT_ENDPOINT = '/api/pricing'
 // they are wire-protocol identifiers, not user-facing labels.
 //
 // Identification on the frontend should rely on the stable negative ID alone.
-// `*_NAME` and `*_BASE_URL` are kept for diagnostics, custom channel
-// detection, and backwards compatibility with the classic frontend.
+// `*_NAME` and `*_BASE_URL` are kept for diagnostics and custom channel
+// detection.
 // ---------------------------------------------------------------------------
 
 export const OFFICIAL_CHANNEL_ID = -100

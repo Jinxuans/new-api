@@ -194,9 +194,8 @@ const RegisterForm = () => {
       );
       const { success, message, data } = res.data;
       if (success) {
-        userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
-        setUserData(data);
+        const user = setUserData(data);
+        userDispatch({ type: 'login', payload: user });
         updateAPI();
         navigate('/');
         showSuccess('登录成功！');
@@ -377,10 +376,9 @@ const RegisterForm = () => {
       const res = await API.get(`/api/oauth/telegram/login`, { params });
       const { success, message, data } = res.data;
       if (success) {
-        userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
+        const user = setUserData(data);
+        userDispatch({ type: 'login', payload: user });
         showSuccess('登录成功！');
-        setUserData(data);
         updateAPI();
         navigate('/');
       } else {

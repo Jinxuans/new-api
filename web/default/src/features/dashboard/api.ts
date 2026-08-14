@@ -33,7 +33,7 @@ import type {
 // ----------------------------------------------------------------------------
 
 // Get user quota data within a time range
-// Admin users get all users' data by default (matching classic frontend behavior)
+// Admin users get all users' data by default.
 export async function getUserQuotaDates(
   params: {
     start_timestamp: number

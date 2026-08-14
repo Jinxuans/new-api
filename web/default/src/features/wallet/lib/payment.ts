@@ -22,7 +22,7 @@ import {
   DEFAULT_PAYMENT_TYPE,
   DEFAULT_MIN_TOPUP,
 } from '../constants'
-import type { PresetAmount, TopupInfo } from '../types'
+import type { PaymentMethod, PresetAmount, TopupInfo } from '../types'
 
 // ============================================================================
 // Payment Processing Functions
@@ -33,8 +33,8 @@ import type { PresetAmount, TopupInfo } from '../types'
  */
 function isSafariBrowser(): boolean {
   return (
-    navigator.userAgent.indexOf('Safari') > -1 &&
-    navigator.userAgent.indexOf('Chrome') < 1
+    navigator.userAgent.includes('Safari') &&
+    !navigator.userAgent.includes('Chrome')
   )
 }
 
@@ -76,6 +76,13 @@ export function isStripePayment(paymentType: string): boolean {
 }
 
 /**
+ * Check if payment method is Waffo
+ */
+export function isWaffoPayment(paymentType: string): boolean {
+  return paymentType === PAYMENT_TYPES.WAFFO
+}
+
+/**
  * Check if payment method is Waffo Pancake
  *
  * Pancake is a metered-style payment that goes through a dedicated checkout
@@ -84,6 +91,32 @@ export function isStripePayment(paymentType: string): boolean {
  */
 export function isWaffoPancakePayment(paymentType: string): boolean {
   return paymentType === PAYMENT_TYPES.WAFFO_PANCAKE
+}
+
+export interface PaymentProcessors {
+  regular: (topupAmount: number, paymentType: string) => Promise<boolean>
+  waffo: (topupAmount: number, payMethodIndex: number) => Promise<boolean>
+  waffoPancake: (topupAmount: number) => Promise<boolean>
+}
+
+export async function dispatchSelectedPayment(
+  paymentMethod: PaymentMethod,
+  topupAmount: number,
+  waffoMethodIndex: number | null,
+  processors: PaymentProcessors
+): Promise<boolean> {
+  if (isWaffoPayment(paymentMethod.type)) {
+    if (waffoMethodIndex === null) {
+      return false
+    }
+    return processors.waffo(topupAmount, waffoMethodIndex)
+  }
+
+  if (isWaffoPancakePayment(paymentMethod.type)) {
+    return processors.waffoPancake(topupAmount)
+  }
+
+  return processors.regular(topupAmount, paymentMethod.type)
 }
 
 /**

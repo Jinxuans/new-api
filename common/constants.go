@@ -30,31 +30,34 @@ func GetTheme() string {
 }
 
 // SetTheme updates the frontend theme atomically.
-// Only "default" and "classic" are accepted; other values are silently ignored.
-func SetTheme(t string) {
-	if t == "default" || t == "classic" {
-		themeValue.Store(t)
+func SetTheme(theme string) {
+	if theme == "default" || theme == "classic" {
+		themeValue.Store(theme)
 	}
 }
 
-// ThemeAwarePath rewrites legacy /console/* paths to the default-theme
-// equivalents when the active theme is "default".  For "classic" (or any
-// other theme) the path is returned unchanged.  The function only touches
-// known prefixes so it is safe to call with arbitrary suffixes and query
-// strings.
-func ThemeAwarePath(suffix string) string {
-	if GetTheme() != "default" {
-		return suffix
+// ThemeAwarePath maps dashboard routes between the two supported frontends.
+func ThemeAwarePath(path string) string {
+	if GetTheme() == "default" {
+		switch {
+		case strings.HasPrefix(path, "/console/topup"):
+			return strings.Replace(path, "/console/topup", "/wallet", 1)
+		case strings.HasPrefix(path, "/console/log"):
+			return strings.Replace(path, "/console/log", "/usage-logs", 1)
+		case strings.HasPrefix(path, "/console/personal"):
+			return strings.Replace(path, "/console/personal", "/profile", 1)
+		}
+		return path
 	}
 	switch {
-	case strings.HasPrefix(suffix, "/console/topup"):
-		return strings.Replace(suffix, "/console/topup", "/wallet", 1)
-	case strings.HasPrefix(suffix, "/console/log"):
-		return strings.Replace(suffix, "/console/log", "/usage-logs", 1)
-	case strings.HasPrefix(suffix, "/console/personal"):
-		return strings.Replace(suffix, "/console/personal", "/profile", 1)
+	case strings.HasPrefix(path, "/wallet"):
+		return strings.Replace(path, "/wallet", "/console/topup", 1)
+	case strings.HasPrefix(path, "/usage-logs"):
+		return strings.Replace(path, "/usage-logs", "/console/log", 1)
+	case strings.HasPrefix(path, "/profile"):
+		return strings.Replace(path, "/profile", "/console/personal", 1)
 	}
-	return suffix
+	return path
 }
 
 // var ChatLink = ""
@@ -76,6 +79,22 @@ var SessionSecret = uuid.New().String()
 var CryptoSecret = uuid.New().String()
 var SessionCookieSecure = false
 var SessionCookieTrustedURLs []string
+
+const (
+	DefaultUserSessionActiveLimit           = 50
+	DefaultUserSessionIssuanceLimit         = 100
+	DefaultUserSessionIssuanceWindowSeconds = 24 * 60 * 60
+	DefaultUserSessionRevokedRetentionDays  = 7
+	DefaultUserSessionHourlyAlertThreshold  = 5000
+)
+
+var (
+	UserSessionActiveLimit           = DefaultUserSessionActiveLimit
+	UserSessionIssuanceLimit         = DefaultUserSessionIssuanceLimit
+	UserSessionIssuanceWindowSeconds = int64(DefaultUserSessionIssuanceWindowSeconds)
+	UserSessionRevokedRetentionDays  = DefaultUserSessionRevokedRetentionDays
+	UserSessionHourlyAlertThreshold  = DefaultUserSessionHourlyAlertThreshold
+)
 
 var OptionMap map[string]string
 var OptionMapRWMutex sync.RWMutex

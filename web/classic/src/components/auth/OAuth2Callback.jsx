@@ -60,9 +60,8 @@ const OAuth2Callback = (props) => {
         showSuccess(t('绑定成功！'));
         navigate('/console/personal');
       } else {
-        userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
-        setUserData(data);
+        const user = setUserData(data);
+        userDispatch({ type: 'login', payload: user });
         updateAPI();
         showSuccess(t('登录成功！'));
         navigate('/console/token');

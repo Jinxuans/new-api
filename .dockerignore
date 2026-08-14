@@ -12,4 +12,6 @@ docs
 /web/default/dist
 /web/classic/node_modules
 /web/classic/dist
+go.work
+go.work.sum
 !THIRD-PARTY-LICENSES.md

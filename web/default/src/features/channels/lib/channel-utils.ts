@@ -51,7 +51,9 @@ export function getChannelTypeIcon(type: number): string {
     6: 'OpenAI', // OpenAIMax
     7: 'OpenAI', // OhMyGPT
     8: 'OpenAI', // Custom
-    59: 'OpenAI', // Advanced Custom
+    59: 'NewAPI', // Advanced Custom
+    60: 'Sub2API', // Sub2API
+    61: 'NewAPI', // New API
     3: 'Azure', // Azure
     58: 'XiaomiMiMo', // Xiaomi MiMo
 
@@ -615,6 +617,14 @@ export type TagRow = Channel & {
  */
 export function isTagAggregateRow(row: Channel | TagRow): row is TagRow {
   return Array.isArray((row as TagRow).children)
+}
+
+export function getChannelTableRowId(row: Channel | TagRow): string {
+  if (isTagAggregateRow(row)) {
+    return `tag:${row.tag || ''}`
+  }
+
+  return `channel:${row.id}`
 }
 
 /**

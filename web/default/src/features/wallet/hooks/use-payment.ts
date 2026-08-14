@@ -23,6 +23,7 @@ import { toast } from 'sonner'
 import {
   calculateAmount,
   calculateStripeAmount,
+  calculateWaffoAmount,
   calculateWaffoPancakeAmount,
   requestPayment,
   requestStripePayment,
@@ -30,13 +31,53 @@ import {
 } from '../api'
 import {
   isStripePayment,
+  isWaffoPayment,
   isWaffoPancakePayment,
   submitPaymentForm,
 } from '../lib'
+import type { AmountRequest, AmountResponse } from '../types'
 
 // ============================================================================
 // Payment Hook
 // ============================================================================
+
+type AmountCalculator = (request: AmountRequest) => Promise<AmountResponse>
+
+export interface PaymentAmountCalculators {
+  regular: AmountCalculator
+  stripe: AmountCalculator
+  waffo: AmountCalculator
+  waffoPancake: AmountCalculator
+}
+
+const defaultPaymentAmountCalculators: PaymentAmountCalculators = {
+  regular: calculateAmount,
+  stripe: calculateStripeAmount,
+  waffo: calculateWaffoAmount,
+  waffoPancake: calculateWaffoPancakeAmount,
+}
+
+export async function requestPaymentAmount(
+  topupAmount: number,
+  paymentType: string,
+  calculators: PaymentAmountCalculators = defaultPaymentAmountCalculators
+): Promise<number> {
+  let calculator = calculators.regular
+  if (isStripePayment(paymentType)) {
+    calculator = calculators.stripe
+  } else if (isWaffoPayment(paymentType)) {
+    calculator = calculators.waffo
+  } else if (isWaffoPancakePayment(paymentType)) {
+    calculator = calculators.waffoPancake
+  }
+
+  const response = await calculator({ amount: topupAmount })
+  if (!isApiSuccess(response) || !response.data) {
+    return 0
+  }
+
+  return Number.parseFloat(response.data)
+}
 
 export function usePayment() {
   const [amount, setAmount] = useState<number>(0)
@@ -48,25 +89,13 @@ export function usePayment() {
     async (topupAmount: number, paymentType: string) => {
       try {
         setCalculating(true)
-
-        const isStripe = isStripePayment(paymentType)
-        const isPancake = isWaffoPancakePayment(paymentType)
-        const response = isStripe
-          ? await calculateStripeAmount({ amount: topupAmount })
-          : isPancake
-            ? await calculateWaffoPancakeAmount({ amount: topupAmount })
-            : await calculateAmount({ amount: topupAmount })
-
-        if (isApiSuccess(response) && response.data) {
-          const calculatedAmount = parseFloat(response.data)
-          setAmount(calculatedAmount)
-          return calculatedAmount
-        }
-
-        // Don't show error for calculation, just set to 0
-        setAmount(0)
-        return 0
-      } catch (_error) {
+        const calculatedAmount = await requestPaymentAmount(
+          topupAmount,
+          paymentType
+        )
+        setAmount(calculatedAmount)
+        return calculatedAmount
+      } catch {
         setAmount(0)
         return 0
       } finally {
@@ -118,7 +147,7 @@ export function usePayment() {
         }
 
         return false
-      } catch (_error) {
+      } catch {
         toast.error(i18next.t('Payment request failed'))
         return false
       } finally {

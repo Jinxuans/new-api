@@ -502,7 +502,7 @@ export function WaffoPancakeSettingsSection({
             <Label>{t('Payment return URL')}</Label>
             <div className='flex gap-2'>
               <Input
-                placeholder='https://example.com/console/topup'
+                placeholder='https://example.com/wallet'
                 value={returnURL}
                 onChange={(event) =>
                   onValueChange('WaffoPancakeReturnURL', event.target.value)

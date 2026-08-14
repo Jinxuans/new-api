@@ -792,7 +792,7 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
     const lastIndex = tiers.length - 1
     // When adding a new fallback, give the previous catch-all tier a default
     // upper-bound condition so the expression compiles into a sane two-tier
-    // shape. Mirrors the classic editor's UX for adding tiers.
+    // shape with an immediately useful fallback.
     if (lastIndex >= 0 && tiers[lastIndex].conditions.length === 0) {
       tiers[lastIndex] = normalizeVisualTier({
         ...tiers[lastIndex],

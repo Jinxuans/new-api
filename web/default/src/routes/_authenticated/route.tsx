@@ -19,38 +19,17 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
 import { AuthenticatedLayout } from '@/components/layout'
-import { getSelf } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
-let sessionVerified = false
-
 export const Route = createFileRoute('/_authenticated')({
-  beforeLoad: async ({ location }) => {
+  beforeLoad: ({ location }) => {
     const { auth } = useAuthStore.getState()
 
-    if (!auth.user) {
+    if (!auth.user || !auth.accessToken) {
       throw redirect({
         to: '/sign-in',
         search: { redirect: location.href },
       })
-    }
-
-    if (!sessionVerified) {
-      const res = await getSelf().catch((err: unknown) =>
-        (err as { response?: { status?: number } })?.response?.status === 401
-          ? { success: false }
-          : null
-      )
-      if (res?.success && res.data) {
-        auth.setUser(res.data)
-        sessionVerified = true
-      } else if (res) {
-        auth.reset()
-        throw redirect({
-          to: '/sign-in',
-          search: { redirect: location.href },
-        })
-      }
     }
   },
   component: AuthenticatedLayout,

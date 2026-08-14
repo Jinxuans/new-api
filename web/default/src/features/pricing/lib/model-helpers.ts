@@ -54,8 +54,8 @@ export function getConfiguredGroupRatio(
  * Resolve the group ratio used by model square summary prices.
  *
  * When no specific group is selected, the model square shows the best price
- * available to the viewer. When a group filter is active, it mirrors classic
- * and shows that group's price.
+ * available to the viewer. When a group filter is active, it shows that
+ * group's price instead.
  */
 export function getDisplayGroupRatio(
   model: PricingModel,

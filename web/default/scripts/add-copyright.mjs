@@ -154,9 +154,12 @@ function applyHeader(text) {
   const header = COPYRIGHT_HEADER.replaceAll('\n', newline)
   const [shebang, body] = splitShebang(text)
   const hadHeader = PROJECT_COPYRIGHT_BLOCK_PATTERN.test(body)
-  const strippedBody = body
-    .replace(PROJECT_COPYRIGHT_BLOCK_PATTERN, '')
-    .replace(/^(?:\r?\n)+/, '')
+  let strippedBody = body
+  while (PROJECT_COPYRIGHT_BLOCK_PATTERN.test(strippedBody)) {
+    strippedBody = strippedBody
+      .replace(PROJECT_COPYRIGHT_BLOCK_PATTERN, '')
+      .replace(/^(?:\r?\n)+/, '')
+  }
 
   if (strippedBody.length === 0) {
     return {

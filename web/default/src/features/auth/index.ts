@@ -28,9 +28,10 @@ export {
   sendPasswordResetEmail,
   sendEmailVerification,
   bindEmail,
-  getOAuthState,
+  createOAuthFlow,
   githubOAuthStart,
   wechatLoginByCode,
+  telegramLogin,
 } from './api'
 
 // ============================================================================
@@ -84,13 +85,7 @@ export {
   hasOAuthProviders,
 } from './lib/oauth'
 
-export {
-  saveUserId,
-  getUserId,
-  removeUserId,
-  getAffiliateCode,
-  saveAffiliateCode,
-} from './lib/storage'
+export { getAffiliateCode, saveAffiliateCode } from './lib/storage'
 
 export {
   isValidOTP,

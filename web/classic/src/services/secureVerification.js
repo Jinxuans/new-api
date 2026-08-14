@@ -92,7 +92,7 @@ export class SecureVerificationService {
    * @param {string} code - 验证码
    * @returns {Promise<void>}
    */
-  static async verify2FA(code) {
+  static async verify2FA(scope, code) {
     if (!code?.trim()) {
       throw new Error('请输入验证码或备用码');
     }
@@ -101,23 +101,26 @@ export class SecureVerificationService {
     const verifyResponse = await API.post('/api/verify', {
       method: '2fa',
       code: code.trim(),
+      scope,
     });
 
     if (!verifyResponse.data?.success) {
       throw new Error(verifyResponse.data?.message || '验证失败');
     }
 
-    // 验证成功，session 已在后端设置
+    return verifyResponse.data.data;
   }
 
   /**
    * 执行Passkey验证
    * @returns {Promise<void>}
    */
-  static async verifyPasskey() {
+  static async verifyPasskey(scope) {
     try {
       // 开始Passkey验证
-      const beginResponse = await API.post('/api/user/passkey/verify/begin');
+      const beginResponse = await API.post('/api/user/passkey/verify/begin', {
+        scope,
+      });
       if (!beginResponse.data?.success) {
         throw new Error(beginResponse.data?.message || '开始验证失败');
       }
@@ -139,22 +142,16 @@ export class SecureVerificationService {
       // 完成验证
       const finishResponse = await API.post(
         '/api/user/passkey/verify/finish',
-        assertionResult,
+        {
+          flow_token: beginResponse.data.data.flow_token,
+          credential: assertionResult,
+        },
       );
       if (!finishResponse.data?.success) {
         throw new Error(finishResponse.data?.message || '验证失败');
       }
 
-      // 调用通用验证 API 设置 session（Passkey 验证已完成）
-      const verifyResponse = await API.post('/api/verify', {
-        method: 'passkey',
-      });
-
-      if (!verifyResponse.data?.success) {
-        throw new Error(verifyResponse.data?.message || '验证失败');
-      }
-
-      // 验证成功，session 已在后端设置
+      return finishResponse.data.data;
     } catch (error) {
       if (error.name === 'NotAllowedError') {
         throw new Error('Passkey 验证被取消或超时');
@@ -172,12 +169,12 @@ export class SecureVerificationService {
    * @param {string} code - 2FA验证码（当method为'2fa'时必需）
    * @returns {Promise<void>}
    */
-  static async verify(method, code = '') {
+  static async verify(method, scope, code = '') {
     switch (method) {
       case '2fa':
-        return await this.verify2FA(code);
+        return await this.verify2FA(scope, code);
       case 'passkey':
-        return await this.verifyPasskey();
+        return await this.verifyPasskey(scope);
       default:
         throw new Error(`不支持的验证方式: ${method}`);
     }
@@ -192,10 +189,19 @@ export const createApiCalls = {
    * 创建查看渠道密钥的API调用
    * @param {number} channelId - 渠道ID
    */
-  viewChannelKey: (channelId) => async () => {
-    // 新系统中，验证已通过中间件处理，直接调用 API 即可
-    const response = await API.post(`/api/channel/${channelId}/key`, {});
-    return response.data;
+  viewChannelKey: (channelId) => {
+    const apiCall = async (proofToken) => {
+      const response = await API.post(
+        `/api/channel/${channelId}/key`,
+        {},
+        proofToken
+          ? { headers: { 'X-Security-Proof': proofToken } }
+          : undefined,
+      );
+      return response.data;
+    };
+    apiCall.securityProofScope = 'channel.key.read';
+    return apiCall;
   },
 
   /**

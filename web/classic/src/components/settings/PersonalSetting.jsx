@@ -259,6 +259,7 @@ const PersonalSetting = () => {
     await startPasskeyVerification(apiCall, {
       preferredMethod: requiredMethod,
       title: t('安全验证'),
+      scope: 'passkey.delete',
       ...options,
     });
   };
@@ -278,13 +279,21 @@ const PersonalSetting = () => {
     await startPasskeyVerification(registerPasskey, {
       preferredMethod: '2fa',
       title: t('安全验证'),
+      scope: 'passkey.register',
     });
   };
 
-  const registerPasskey = async () => {
+  const registerPasskey = async (proofToken) => {
     setPasskeyRegisterLoading(true);
     try {
-      const beginRes = await API.post('/api/user/passkey/register/begin');
+      const proofConfig = proofToken
+        ? { headers: { 'X-Security-Proof': proofToken } }
+        : undefined;
+      const beginRes = await API.post(
+        '/api/user/passkey/register/begin',
+        undefined,
+        proofConfig,
+      );
       const { success, message, data } = beginRes.data;
       if (!success) {
         throw new Error(message || t('无法发起 Passkey 注册'));
@@ -301,7 +310,8 @@ const PersonalSetting = () => {
 
       const finishRes = await API.post(
         '/api/user/passkey/register/finish',
-        payload,
+        { flow_token: data.flow_token, credential: payload },
+        proofConfig,
       );
       if (!finishRes.data.success) {
         throw new Error(
@@ -331,10 +341,12 @@ const PersonalSetting = () => {
     await startPasskeyRegistration();
   };
 
-  const removePasskey = async () => {
+  const removePasskey = async (proofToken) => {
     setPasskeyDeleteLoading(true);
     try {
-      const res = await API.delete('/api/user/passkey');
+      const res = await API.delete('/api/user/passkey', {
+        headers: { 'X-Security-Proof': proofToken },
+      });
       const { success, message } = res.data;
       if (!success) {
         throw new Error(message || t('操作失败，请重试'));
@@ -388,7 +400,9 @@ const PersonalSetting = () => {
 
     if (success) {
       showSuccess(t('账户已删除！'));
-      await API.get('/api/user/logout');
+      await API.post('/api/user/auth/logout', undefined, {
+        skipAuthRefresh: true,
+      });
       userDispatch({ type: 'logout' });
       localStorage.removeItem('user');
       navigate('/login');

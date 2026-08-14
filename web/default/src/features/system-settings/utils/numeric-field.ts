@@ -22,6 +22,11 @@ import type {
   FieldPath,
   FieldValues,
 } from 'react-hook-form'
+import { z } from 'zod'
+
+export function positiveIntegerSchema(message: string) {
+  return z.number().int(message).positive(message)
+}
 
 /**
  * Props produced by {@link safeNumberFieldProps} for a native
@@ -48,8 +53,8 @@ export type SafeNumberFieldProps = {
  *   numeric validators (`z.number().min(...)`, `z.coerce.number()`, etc.)
  *   fail at submit time, so `form.handleSubmit` silently refuses to call
  *   `onSubmit` — the save button appears frozen with no toast and no error.
- * - The legacy Semi `InputNumber` avoids this by snapping the input back to
- *   the previous valid number. We replicate that behaviour by ignoring `NaN`
+ * - Numeric inputs should snap back to the previous valid number instead of
+ *   keeping `NaN`. We preserve that behaviour by ignoring `NaN`
  *   updates: React's controlled-input reconciliation will restore the last
  *   valid value to the DOM on the next render.
  *
