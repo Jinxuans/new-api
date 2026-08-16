@@ -451,10 +451,6 @@ func TransferAffQuota(c *gin.Context) {
 	}
 
 	id := c.GetInt("id")
-	if err := model.SyncInvitationRebatesForInviter(id); err != nil {
-		common.ApiError(c, err)
-		return
-	}
 	user, err := model.GetUserById(id, true)
 	if err != nil {
 		common.ApiError(c, err)
@@ -501,10 +497,6 @@ func GetAffCode(c *gin.Context) {
 func GetAffRecords(c *gin.Context) {
 	id := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
-	if err := model.SyncInvitationRebatesForInviter(id); err != nil {
-		common.ApiError(c, err)
-		return
-	}
 
 	records, total, err := model.GetUserInvitationRecords(id, pageInfo)
 	if err != nil {
@@ -520,10 +512,6 @@ func GetAffRecords(c *gin.Context) {
 func GetAffRebates(c *gin.Context) {
 	id := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
-	if err := model.SyncInvitationRebatesForInviter(id); err != nil {
-		common.ApiError(c, err)
-		return
-	}
 
 	records, total, err := model.GetUserInvitationRebateRecords(id, pageInfo)
 	if err != nil {

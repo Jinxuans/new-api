@@ -58,7 +58,6 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
   personal: {
     enabled: true,
     topup: true,
-    rewards: true,
     promotion: true,
     personal: true,
   },
@@ -88,18 +87,17 @@ const mergeWithDefaultSidebarModules = (
 
       merged[sectionKey] = { ...defaultSection, ...existingSection }
       if (sectionKey === 'personal') {
-        if (
-          existingSection.invite !== undefined &&
-          existingSection.rewards === undefined
-        ) {
-          merged[sectionKey].rewards = existingSection.invite
-        }
-        if (
-          existingSection.invite !== undefined &&
-          existingSection.promotion === undefined
-        ) {
-          merged[sectionKey].promotion = existingSection.invite
-        }
+        const hasLegacyPromotion =
+          existingSection.rewards !== undefined ||
+          existingSection.invite !== undefined
+        merged[sectionKey].promotion =
+          existingSection.promotion ??
+          (hasLegacyPromotion
+            ? existingSection.rewards === true ||
+              existingSection.invite === true
+            : defaultSection.promotion)
+        delete merged[sectionKey].rewards
+        delete merged[sectionKey].invite
       }
       Object.keys(defaultSection).forEach((moduleKey) => {
         if (merged[sectionKey][moduleKey] === undefined) {
@@ -128,7 +126,7 @@ const URL_TO_CONFIG_MAP: Record<string, { section: string; module: string }> = {
   '/usage-logs/drawing': { section: 'console', module: 'midjourney' },
   '/usage-logs/task': { section: 'console', module: 'task' },
   '/wallet': { section: 'personal', module: 'topup' },
-  '/growth': { section: 'personal', module: 'rewards' },
+  '/growth': { section: 'personal', module: 'promotion' },
   '/promotion': { section: 'personal', module: 'promotion' },
   '/invite': { section: 'personal', module: 'promotion' },
   '/profile': { section: 'personal', module: 'personal' },
@@ -178,12 +176,18 @@ function parseUserSidebarConfig(
   try {
     const parsed = JSON.parse(value) as SidebarModulesAdminConfig
     if (!parsed || typeof parsed !== 'object') return null
-    if (parsed.personal?.invite !== undefined) {
-      parsed.personal = {
-        ...parsed.personal,
-        rewards: parsed.personal.rewards ?? parsed.personal.invite,
-        promotion: parsed.personal.promotion ?? parsed.personal.invite,
-      }
+    if (parsed.personal) {
+      const personal = { ...parsed.personal }
+      const hasLegacyPromotion =
+        personal.rewards !== undefined || personal.invite !== undefined
+      personal.promotion =
+        personal.promotion ??
+        (hasLegacyPromotion
+          ? personal.rewards === true || personal.invite === true
+          : personal.promotion)
+      delete personal.rewards
+      delete personal.invite
+      parsed.personal = personal
     }
     return parsed
   } catch {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -194,7 +195,7 @@ func loadOptionsFromDatabase() {
 	dbOptions := make(map[string]string, len(options))
 	for _, option := range options {
 		dbOptions[option.Key] = option.Value
-		if isLegacyCheckinOptionKey(option.Key) {
+		if isLegacyOptionKey(option.Key) {
 			continue
 		}
 		err := updateOptionMap(option.Key, option.Value)
@@ -202,7 +203,7 @@ func loadOptionsFromDatabase() {
 			common.SysLog("failed to update option map: " + err.Error())
 		}
 	}
-	migrateLegacyCheckinOptions(dbOptions)
+	migrateLegacyOptions(dbOptions)
 }
 
 func SyncOptions(frequency int) {
@@ -252,13 +253,26 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
+	normalizedValues := make(map[string]string, len(values))
+	normalizedSources := make(map[string]string, len(values))
 	for key, value := range values {
-		if err := validateOptionValue(key, value); err != nil {
+		normalizedKey := normalizeLegacyOptionKey(key)
+		if existingValue, exists := normalizedValues[normalizedKey]; exists && existingValue != value {
+			return fmt.Errorf(
+				"conflicting values for option %q from %q and %q",
+				normalizedKey,
+				normalizedSources[normalizedKey],
+				key,
+			)
+		}
+		if err := validateOptionValue(normalizedKey, value); err != nil {
 			return err
 		}
+		normalizedValues[normalizedKey] = value
+		normalizedSources[normalizedKey] = key
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		for k, v := range values {
+		for k, v := range normalizedValues {
 			option := Option{Key: k}
 			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
 				return err
@@ -273,7 +287,7 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for k, v := range values {
+	for k, v := range normalizedValues {
 		if err := updateOptionMap(k, v); err != nil {
 			return err
 		}
@@ -612,6 +626,8 @@ func updateOptionMap(key string, value string) (err error) {
 
 func normalizeLegacyOptionKey(key string) string {
 	switch key {
+	case "InviteRebatePercentage":
+		return "growth_setting.invite_rebate_percentage"
 	case "checkin_setting.enabled":
 		return "growth_setting.daily_checkin_enabled"
 	case "checkin_setting.min_quota":
@@ -623,11 +639,11 @@ func normalizeLegacyOptionKey(key string) string {
 	}
 }
 
-func isLegacyCheckinOptionKey(key string) bool {
+func isLegacyOptionKey(key string) bool {
 	return normalizeLegacyOptionKey(key) != key
 }
 
-func migrateLegacyCheckinOptions(dbOptions map[string]string) {
+func migrateLegacyOptions(dbOptions map[string]string) {
 	for legacyKey, legacyValue := range dbOptions {
 		newKey := normalizeLegacyOptionKey(legacyKey)
 		if newKey == legacyKey {
@@ -636,8 +652,8 @@ func migrateLegacyCheckinOptions(dbOptions map[string]string) {
 		if _, exists := dbOptions[newKey]; exists {
 			continue
 		}
-		if err := updateOptionMap(newKey, legacyValue); err != nil {
-			common.SysLog("failed to migrate legacy check-in option: " + err.Error())
+		if err := UpdateOption(newKey, legacyValue); err != nil {
+			common.SysLog("failed to migrate legacy option: " + err.Error())
 		}
 	}
 }
@@ -675,6 +691,11 @@ func handleConfigUpdate(key, value string) bool {
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()
+	} else if configName == "theme" {
+		system_setting.UpdateAndSyncTheme()
+	} else if configName == "growth_setting" && configKey == "invite_rebate_percentage" {
+		common.InviteRebatePercentage = operation_setting.GetInviteRebatePercentage()
+		common.OptionMap["InviteRebatePercentage"] = value
 	}
 
 	return true // 已处理

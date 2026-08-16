@@ -26,7 +26,6 @@ import {
   Key,
   LayoutDashboard,
   ListTodo,
-  Megaphone,
   MessageSquare,
   PenLine,
   Radio,
@@ -39,7 +38,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { type SidebarData } from '@/components/layout/types'
+import type { SidebarData } from '@/components/layout/types'
 import { ROLE } from '@/lib/roles'
 
 /**
@@ -117,15 +116,11 @@ export function useSidebarData(): SidebarData {
             icon: Wallet,
           },
           {
-            title: t('Reward Center'),
-            url: '/growth',
-            icon: Gift,
-          },
-          {
-            title: t('Promotion Center'),
+            title: t('Rewards & referrals'),
             url: '/promotion',
-            activeUrls: ['/invite'],
-            icon: Megaphone,
+            activeUrls: ['/growth', '/invite'],
+            configUrls: ['/promotion'],
+            icon: Gift,
           },
           {
             title: t('Profile'),

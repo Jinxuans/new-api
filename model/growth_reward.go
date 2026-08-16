@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -14,25 +15,35 @@ const (
 	GrowthRewardStatusTransferred = "transferred"
 	GrowthRewardStatusFrozen      = "frozen"
 	GrowthRewardStatusRejected    = "rejected"
+	GrowthRewardStatusReversed    = "reversed"
 )
 
+var ErrGrowthRewardAlreadyClaimed = errors.New("growth reward already claimed")
+
 type GrowthReward struct {
-	Id          int    `json:"id" gorm:"primaryKey"`
-	UserId      int    `json:"user_id" gorm:"index;not null"`
-	ItemCode    string `json:"item_code" gorm:"type:varchar(64);index;not null"`
-	RewardQuota int    `json:"reward_quota" gorm:"not null;default:0"`
-	Status      string `json:"status" gorm:"type:varchar(32);index;not null"`
-	SourceId    int    `json:"source_id" gorm:"index;default:0"`
-	AvailableAt int64  `json:"available_at" gorm:"bigint;index"`
-	CreatedAt   int64  `json:"created_at" gorm:"bigint;index"`
-	SettledAt   int64  `json:"settled_at" gorm:"bigint;index"`
-	Remark      string `json:"remark" gorm:"type:text"`
+	Id          int     `json:"id" gorm:"primaryKey"`
+	UserId      int     `json:"user_id" gorm:"index;not null"`
+	ItemCode    string  `json:"item_code" gorm:"type:varchar(64);index;not null"`
+	RewardQuota int     `json:"reward_quota" gorm:"not null;default:0"`
+	Status      string  `json:"status" gorm:"type:varchar(32);index;not null"`
+	SourceId    int     `json:"source_id" gorm:"index;default:0"`
+	ClaimKey    *string `json:"-" gorm:"type:varchar(191);uniqueIndex"`
+	AvailableAt int64   `json:"available_at" gorm:"bigint;index"`
+	CreatedAt   int64   `json:"created_at" gorm:"bigint;index"`
+	SettledAt   int64   `json:"settled_at" gorm:"bigint;index"`
+	Remark      string  `json:"remark" gorm:"type:text"`
 }
 
 type GrowthRewardSummary struct {
-	AvailableRewardQuota int64 `json:"available_reward_quota"`
-	PendingRewardQuota   int64 `json:"pending_reward_quota"`
-	TotalRewardQuota     int64 `json:"total_reward_quota"`
+	// Legacy aggregate fields retained for service compatibility. They mix
+	// task rewards and referral credits; new code should use the split fields.
+	AvailableRewardQuota         int64 `json:"available_reward_quota"`
+	PendingRewardQuota           int64 `json:"pending_reward_quota"`
+	TotalRewardQuota             int64 `json:"total_reward_quota"`
+	TaskRewardEarnedQuota        int64 `json:"task_reward_earned_quota"`
+	TaskRewardPendingQuota       int64 `json:"task_reward_pending_quota"`
+	ReferralCreditAvailableQuota int64 `json:"referral_credit_available_quota"`
+	ReferralCreditTotalQuota     int64 `json:"referral_credit_total_quota"`
 }
 
 func (GrowthReward) TableName() string {
@@ -103,8 +114,15 @@ func CreateSettledGrowthRewardTx(tx *gorm.DB, reward *GrowthReward) error {
 	if reward == nil {
 		return errors.New("reward is required")
 	}
-	if err := tx.Create(reward).Error; err != nil {
-		return err
+	result := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "claim_key"}},
+		DoNothing: true,
+	}).Create(reward)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrGrowthRewardAlreadyClaimed
 	}
 	if err := CreateGrowthRewardEventTx(tx, reward); err != nil {
 		return err
@@ -112,34 +130,53 @@ func CreateSettledGrowthRewardTx(tx *gorm.DB, reward *GrowthReward) error {
 	if reward.RewardQuota <= 0 {
 		return nil
 	}
-	return tx.Model(&User{}).
-		Where("id = ?", reward.UserId).
-		Update("quota", gorm.Expr("quota + ?", reward.RewardQuota)).Error
+	maxCurrentQuota, err := topUpQuotaMaxCurrent(reward.RewardQuota)
+	if err != nil {
+		return err
+	}
+	result = tx.Model(&User{}).
+		Where("id = ? AND quota <= ?", reward.UserId, maxCurrentQuota).
+		Update("quota", gorm.Expr("quota + ?", reward.RewardQuota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTopUpQuotaLimitExceeded
+	}
+	return nil
+}
+
+func LockUserForGrowthRewardTx(tx *gorm.DB, userId int) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	var user User
+	return lockForUpdate(tx).Select("id").Where("id = ?", userId).First(&user).Error
 }
 
 func GetGrowthRewardSummary(userId int) (*GrowthRewardSummary, error) {
 	summary := &GrowthRewardSummary{}
-	if err := DB.Model(&User{}).Where("id = ?", userId).Select("aff_quota").Scan(&summary.AvailableRewardQuota).Error; err != nil {
+	var user User
+	if err := DB.Select("aff_quota", "aff_history").Where("id = ?", userId).First(&user).Error; err != nil {
 		return nil, err
 	}
+	summary.AvailableRewardQuota = int64(user.AffQuota)
+	summary.ReferralCreditAvailableQuota = int64(user.AffQuota)
+	summary.ReferralCreditTotalQuota = int64(user.AffHistoryQuota)
 	if err := DB.Model(&GrowthReward{}).
 		Where("user_id = ? AND status = ?", userId, GrowthRewardStatusPending).
 		Select("COALESCE(SUM(reward_quota), 0)").
-		Scan(&summary.PendingRewardQuota).Error; err != nil {
+		Scan(&summary.TaskRewardPendingQuota).Error; err != nil {
 		return nil, err
 	}
-	var growthTotal int64
+	summary.PendingRewardQuota = summary.TaskRewardPendingQuota
 	if err := DB.Model(&GrowthReward{}).
 		Where("user_id = ? AND status IN ?", userId, []string{GrowthRewardStatusSettled, GrowthRewardStatusTransferred}).
 		Select("COALESCE(SUM(reward_quota), 0)").
-		Scan(&growthTotal).Error; err != nil {
+		Scan(&summary.TaskRewardEarnedQuota).Error; err != nil {
 		return nil, err
 	}
-	var affTotal int64
-	if err := DB.Model(&User{}).Where("id = ?", userId).Select("aff_history").Scan(&affTotal).Error; err != nil {
-		return nil, err
-	}
-	summary.TotalRewardQuota = growthTotal + affTotal
+	summary.TotalRewardQuota = summary.TaskRewardEarnedQuota + summary.ReferralCreditTotalQuota
 	return summary, nil
 }
 

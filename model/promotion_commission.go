@@ -25,6 +25,8 @@ const (
 	PromotionWithdrawalStatusFailed        = "failed"
 )
 
+var ErrPromotionWithdrawalLedgerNotPayable = errors.New("withdrawal contains a commission that is no longer eligible for payout")
+
 type PromotionCommissionLedger struct {
 	Id                  int    `json:"id"`
 	UserId              int    `json:"user_id" gorm:"index"`
@@ -154,6 +156,20 @@ func CreatePromotionCommissionLedgerTx(tx *gorm.DB, ledger *PromotionCommissionL
 	return CreatePromotionCommissionEventTx(tx, ledger, eventType)
 }
 
+// FreezeUnverifiedTopUpPromotionCommissions prevents legacy estimated rebates
+// from remaining cashable after payment verification was introduced. It is
+// safe to run after every migration and intentionally also freezes orphaned
+// top-up rebate ledgers whose source row cannot prove a verified payment.
+func FreezeUnverifiedTopUpPromotionCommissions() error {
+	verifiedRebateIds := DB.Model(&InvitationRebate{}).
+		Select("id").
+		Where("paid_amount_verified = ?", true)
+	return DB.Model(&PromotionCommissionLedger{}).
+		Where("source_type = ? AND cashable = ?", PromotionCommissionSourceTopUpRebate, true).
+		Where("source_id NOT IN (?)", verifiedRebateIds).
+		Update("cashable", false).Error
+}
+
 func SettlePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId int, settledAt int64) error {
 	if tx == nil {
 		return errors.New("transaction is required")
@@ -183,6 +199,99 @@ func SettlePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId 
 	return CreatePromotionCommissionEventTx(tx, &ledger, PromotionEventTypeCommissionSettled)
 }
 
+// LockSettledPromotionCommissionLedgersTx returns the CNY commission rows
+// eligible for a transfer or withdrawal while holding real row locks on
+// MySQL/PostgreSQL. Callers must still use a status predicate on their UPDATE
+// so SQLite and concurrent state transitions remain CAS-safe.
+func LockSettledPromotionCommissionLedgersTx(tx *gorm.DB, userId int) ([]*PromotionCommissionLedger, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required")
+	}
+	verifiedRebateIds := tx.Model(&InvitationRebate{}).
+		Select("id").
+		Where("paid_amount_verified = ?", true)
+	var ledgers []*PromotionCommissionLedger
+	err := lockForUpdate(tx).
+		Where("user_id = ? AND status = ? AND cashable = ? AND currency = ?", userId, PromotionCommissionStatusSettled, true, "CNY").
+		Where("source_type <> ? OR source_id IN (?)", PromotionCommissionSourceTopUpRebate, verifiedRebateIds).
+		Order("id ASC").
+		Find(&ledgers).Error
+	return ledgers, err
+}
+
+// ValidatePromotionWithdrawalLedgersPayableTx rechecks every ledger attached
+// to a withdrawal immediately before approval or payout. This closes the
+// upgrade window for withdrawal rows created before legacy unverified rebates
+// were frozen.
+func ValidatePromotionWithdrawalLedgersPayableTx(tx *gorm.DB, withdrawalId int) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if withdrawalId <= 0 {
+		return ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	var items []PromotionWithdrawalItem
+	if err := tx.Where("withdrawal_id = ?", withdrawalId).Find(&items).Error; err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	ledgerIds := make([]int, 0, len(items))
+	seenLedgerIds := make(map[int]struct{}, len(items))
+	for _, item := range items {
+		if item.LedgerId <= 0 {
+			return ErrPromotionWithdrawalLedgerNotPayable
+		}
+		if _, exists := seenLedgerIds[item.LedgerId]; exists {
+			return ErrPromotionWithdrawalLedgerNotPayable
+		}
+		seenLedgerIds[item.LedgerId] = struct{}{}
+		ledgerIds = append(ledgerIds, item.LedgerId)
+	}
+
+	var ledgers []PromotionCommissionLedger
+	if err := lockForUpdate(tx).Where("id IN ?", ledgerIds).Find(&ledgers).Error; err != nil {
+		return err
+	}
+	if len(ledgers) != len(ledgerIds) {
+		return ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	verifiedRebateIds := make(map[int]struct{})
+	var sourceIds []int
+	for _, ledger := range ledgers {
+		if ledger.SourceType == PromotionCommissionSourceTopUpRebate {
+			sourceIds = append(sourceIds, ledger.SourceId)
+		}
+	}
+	if len(sourceIds) > 0 {
+		var ids []int
+		if err := tx.Model(&InvitationRebate{}).
+			Where("id IN ? AND paid_amount_verified = ?", sourceIds, true).
+			Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		for _, id := range ids {
+			verifiedRebateIds[id] = struct{}{}
+		}
+	}
+
+	for _, ledger := range ledgers {
+		if ledger.Status != PromotionCommissionStatusWithdrawing || !ledger.Cashable || ledger.Currency != "CNY" {
+			return ErrPromotionWithdrawalLedgerNotPayable
+		}
+		if ledger.SourceType == PromotionCommissionSourceTopUpRebate {
+			if _, verified := verifiedRebateIds[ledger.SourceId]; !verified {
+				return ErrPromotionWithdrawalLedgerNotPayable
+			}
+		}
+	}
+	return nil
+}
+
 func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId int, refundTradeNo string, remark string) error {
 	if tx == nil {
 		return errors.New("transaction is required")
@@ -191,7 +300,7 @@ func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId
 		return nil
 	}
 	var ledger PromotionCommissionLedger
-	err := tx.Set("gorm:query_option", "FOR UPDATE").
+	err := lockForUpdate(tx).
 		Where("source_type = ? AND source_id = ?", sourceType, sourceId).
 		First(&ledger).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -203,18 +312,23 @@ func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId
 	if ledger.Status == PromotionCommissionStatusReversed {
 		return nil
 	}
-	if ledger.Status == PromotionCommissionStatusTransferred && ledger.QuotaEquivalent > 0 {
-		if err := tx.Model(&User{}).
-			Where("id = ?", ledger.UserId).
-			Update("quota", gorm.Expr("quota - ?", ledger.QuotaEquivalent)).Error; err != nil {
-			return err
-		}
-	}
 	if ledger.Status == PromotionCommissionStatusWithdrawing || ledger.Status == PromotionCommissionStatusWithdrawn {
 		return fmt.Errorf("commission ledger is %s; manual reversal required", ledger.Status)
 	}
-	if err := tx.Model(&PromotionCommissionLedger{}).
-		Where("id = ?", ledger.Id).
+	if ledger.Status == PromotionCommissionStatusTransferred && ledger.QuotaEquivalent > 0 {
+		minimumCurrentQuota := common.MinQuota + ledger.QuotaEquivalent
+		result := tx.Model(&User{}).
+			Where("id = ? AND quota >= ?", ledger.UserId, minimumCurrentQuota).
+			Update("quota", gorm.Expr("quota - ?", ledger.QuotaEquivalent))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("commission reversal would exceed wallet quota range")
+		}
+	}
+	result := tx.Model(&PromotionCommissionLedger{}).
+		Where("id = ? AND status = ?", ledger.Id, ledger.Status).
 		Updates(map[string]interface{}{
 			"status":                PromotionCommissionStatusReversed,
 			"refund_trade_no":       refundTradeNo,
@@ -222,8 +336,12 @@ func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId
 			"reversal_quota":        ledger.QuotaEquivalent,
 			"reversed_at":           common.GetTimestamp(),
 			"remark":                remark,
-		}).Error; err != nil {
-		return err
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("commission status changed, please retry")
 	}
 	if err := tx.Where("id = ?", ledger.Id).First(&ledger).Error; err != nil {
 		return err
@@ -253,19 +371,6 @@ func ListPromotionWithdrawals(userId int, pageInfo *common.PageInfo) ([]*Promoti
 	var withdrawals []*PromotionWithdrawal
 	err := DB.Where("user_id = ?", userId).
 		Order("id DESC").
-		Limit(pageInfo.GetPageSize()).
-		Offset(pageInfo.GetStartIdx()).
-		Find(&withdrawals).Error
-	return withdrawals, total, err
-}
-
-func AdminListPromotionWithdrawals(pageInfo *common.PageInfo) ([]*PromotionWithdrawal, int64, error) {
-	var total int64
-	if err := DB.Model(&PromotionWithdrawal{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var withdrawals []*PromotionWithdrawal
-	err := DB.Order("id DESC").
 		Limit(pageInfo.GetPageSize()).
 		Offset(pageInfo.GetStartIdx()).
 		Find(&withdrawals).Error

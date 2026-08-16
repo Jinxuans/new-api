@@ -16,12 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ExternalLink, Pencil, RefreshCw, Save } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
-import { formatQuota } from '@/lib/format'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -44,13 +43,40 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
-import { rewardItemCopy, type GrowthRewardItem } from '@/features/growth/shared'
+import { rewardItemCopy } from '@/features/promotion/shared'
+import { api } from '@/lib/api'
+import { formatQuota } from '@/lib/format'
+
 import { SettingsSection } from '../components/settings-section'
 
-const DAILY_CHECKIN_CODE = 'daily_checkin'
-const JOIN_COMMUNITY_CODE = 'join_community'
 const MONTHLY_SPEND_CODE = 'monthly_spend_target'
-const SUBMISSION_ITEM_TYPES = new Set(['manual', 'semi_auto'])
+
+type AdminGrowthRewardItem = {
+  id: number
+  code: string
+  title: string
+  description: string
+  introduction?: string
+  reward_quota: number
+  effective_reward_quota_min: number
+  effective_reward_quota_max: number
+  reward_source: 'reward_program' | 'item_override'
+  item_type: string
+  action_url?: string
+  enabled: boolean
+  effective_enabled: boolean
+  once_per_user: boolean
+  daily_limit: number
+  built_in: boolean
+  claim_password_configured: boolean
+  capabilities: {
+    reward_override: boolean
+    action_url: boolean
+    introduction: boolean
+    claim_password: boolean
+    daily_limit: boolean
+  }
+}
 
 type RewardItemDraft = {
   custom_reward: boolean
@@ -62,34 +88,12 @@ type RewardItemDraft = {
   daily_limit: string
 }
 
-function isSubmissionItem(item: GrowthRewardItem) {
-  return SUBMISSION_ITEM_TYPES.has(item.item_type)
-}
-
-function supportsRewardOverride(item: GrowthRewardItem) {
-  return item.code !== DAILY_CHECKIN_CODE
-}
-
-function supportsActionUrl(item: GrowthRewardItem) {
-  return item.code === JOIN_COMMUNITY_CODE || isSubmissionItem(item)
-}
-
-function supportsIntroduction(item: GrowthRewardItem) {
-  return isSubmissionItem(item)
-}
-
-function supportsClaimPassword(item: GrowthRewardItem) {
-  return item.code === JOIN_COMMUNITY_CODE
-}
-
-function supportsDailyLimit(item: GrowthRewardItem) {
-  return isSubmissionItem(item)
-}
-
-function toDraft(item: GrowthRewardItem): RewardItemDraft {
+function toDraft(item: AdminGrowthRewardItem): RewardItemDraft {
   return {
-    custom_reward: Number(item.reward_quota || 0) > 0,
-    reward_quota: String(item.reward_quota || 0),
+    custom_reward: item.reward_source === 'item_override',
+    reward_quota: String(
+      item.reward_quota || item.effective_reward_quota_min || 0
+    ),
     introduction: item.introduction || '',
     action_url: item.action_url || '',
     claim_password: '',
@@ -100,10 +104,9 @@ function toDraft(item: GrowthRewardItem): RewardItemDraft {
 
 export function GrowthRewardItemsSection() {
   const { t } = useTranslation()
-  const [items, setItems] = useState<GrowthRewardItem[]>([])
-  const [selectedItem, setSelectedItem] = useState<GrowthRewardItem | null>(
-    null
-  )
+  const [items, setItems] = useState<AdminGrowthRewardItem[]>([])
+  const [selectedItem, setSelectedItem] =
+    useState<AdminGrowthRewardItem | null>(null)
   const [draft, setDraft] = useState<RewardItemDraft | null>(null)
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<number | null>(null)
@@ -112,7 +115,7 @@ export function GrowthRewardItemsSection() {
     try {
       setLoading(true)
       const res = await api.get('/api/growth/admin/items')
-      setItems((res.data?.data || []) as GrowthRewardItem[])
+      setItems((res.data?.data || []) as AdminGrowthRewardItem[])
     } finally {
       setLoading(false)
     }
@@ -123,15 +126,16 @@ export function GrowthRewardItemsSection() {
   }, [loadItems])
 
   const counts = useMemo(() => {
-    const enabled = items.filter((item) => item.enabled !== false).length
+    const enabled = items.filter((item) => item.effective_enabled).length
     const custom = items.filter(
       (item) =>
-        supportsRewardOverride(item) && Number(item.reward_quota || 0) > 0
+        item.capabilities.reward_override &&
+        item.reward_source === 'item_override'
     ).length
     return { enabled, custom }
   }, [items])
 
-  const openEditor = (item: GrowthRewardItem) => {
+  const openEditor = (item: AdminGrowthRewardItem) => {
     setSelectedItem(item)
     setDraft(toDraft(item))
   }
@@ -151,7 +155,7 @@ export function GrowthRewardItemsSection() {
 
     const customRewardQuota = Math.max(0, Number(draft.reward_quota || 0))
     if (
-      supportsRewardOverride(selectedItem) &&
+      selectedItem.capabilities.reward_override &&
       draft.custom_reward &&
       customRewardQuota <= 0
     ) {
@@ -159,32 +163,31 @@ export function GrowthRewardItemsSection() {
       return
     }
 
-    const payload: Record<string, unknown> = {
-      code: selectedItem.code,
-      title: selectedItem.title,
-      description: selectedItem.description,
-      introduction: supportsIntroduction(selectedItem)
-        ? draft.introduction.trim()
-        : selectedItem.introduction || '',
-      reward_quota: supportsRewardOverride(selectedItem)
-        ? draft.custom_reward
-          ? customRewardQuota
-          : 0
-        : selectedItem.reward_quota || 0,
-      item_type: selectedItem.item_type,
-      action_url: supportsActionUrl(selectedItem)
-        ? draft.action_url.trim()
-        : selectedItem.action_url || '',
-      enabled: draft.enabled,
-      once_per_user: isSubmissionItem(selectedItem)
-        ? false
-        : selectedItem.once_per_user !== false,
-      daily_limit: supportsDailyLimit(selectedItem)
-        ? Math.max(0, Number(draft.daily_limit || 0))
-        : selectedItem.daily_limit || 0,
+    let rewardQuota = 0
+    if (selectedItem.capabilities.reward_override && draft.custom_reward) {
+      rewardQuota = customRewardQuota
     }
 
-    if (supportsClaimPassword(selectedItem) && draft.claim_password.trim()) {
+    const payload: Record<string, unknown> = {
+      title: selectedItem.title,
+      description: selectedItem.description,
+      introduction: selectedItem.capabilities.introduction
+        ? draft.introduction.trim()
+        : '',
+      reward_quota: rewardQuota,
+      action_url: selectedItem.capabilities.action_url
+        ? draft.action_url.trim()
+        : '',
+      enabled: draft.enabled,
+      daily_limit: selectedItem.capabilities.daily_limit
+        ? Math.max(0, Number(draft.daily_limit || 0))
+        : 0,
+    }
+
+    if (
+      selectedItem.capabilities.claim_password &&
+      draft.claim_password.trim()
+    ) {
       payload.claim_password = draft.claim_password.trim()
     }
 
@@ -205,33 +208,39 @@ export function GrowthRewardItemsSection() {
     }
   }
 
-  const titleFor = (item: GrowthRewardItem) =>
+  const titleFor = (item: AdminGrowthRewardItem) =>
     t(rewardItemCopy[item.code]?.title || item.title || item.code)
 
-  const rewardSourceLabel = (item: GrowthRewardItem) => {
-    if (!supportsRewardOverride(item)) return t('Configured elsewhere')
-    return Number(item.reward_quota || 0) > 0
-      ? t('Custom reward')
-      : t('Global default')
+  const rewardSourceLabel = (item: AdminGrowthRewardItem) => {
+    return item.reward_source === 'item_override'
+      ? t('Task override')
+      : t('Reward program')
   }
 
-  const rewardValueLabel = (item: GrowthRewardItem) => {
-    if (!supportsRewardOverride(item)) return t('Daily check-in rules')
-    return Number(item.reward_quota || 0) > 0
-      ? formatQuota(item.reward_quota)
-      : t('Uses global default')
+  const rewardValueLabel = (item: AdminGrowthRewardItem) => {
+    if (item.effective_reward_quota_min !== item.effective_reward_quota_max) {
+      return t('{{min}} to {{max}}', {
+        min: formatQuota(item.effective_reward_quota_min),
+        max: formatQuota(item.effective_reward_quota_max),
+      })
+    }
+    return formatQuota(item.effective_reward_quota_min)
   }
 
-  const configLabels = (item: GrowthRewardItem) => {
+  const configLabels = (item: AdminGrowthRewardItem) => {
     const labels: string[] = []
-    if (supportsActionUrl(item)) {
+    if (item.capabilities.action_url) {
+      labels.push(t('Community link'))
+    }
+    if (item.capabilities.introduction) labels.push(t('Task introduction'))
+    if (item.capabilities.claim_password) {
       labels.push(
-        item.code === JOIN_COMMUNITY_CODE ? t('Community link') : t('Guide URL')
+        item.claim_password_configured
+          ? t('Claim password set')
+          : t('Claim password not set')
       )
     }
-    if (supportsIntroduction(item)) labels.push(t('Task introduction'))
-    if (supportsClaimPassword(item)) labels.push(t('Claim password'))
-    if (supportsDailyLimit(item)) {
+    if (item.capabilities.daily_limit) {
       labels.push(
         item.daily_limit && item.daily_limit > 0
           ? t('Daily limit {{count}}', { count: item.daily_limit })
@@ -288,6 +297,12 @@ export function GrowthRewardItemsSection() {
               {items.length > 0 ? (
                 items.map((item) => {
                   const labels = configLabels(item)
+                  let statusLabel = t('Disabled')
+                  if (item.effective_enabled) {
+                    statusLabel = t('Enabled')
+                  } else if (item.enabled) {
+                    statusLabel = t('Disabled by program')
+                  }
                   return (
                     <TableRow key={item.id}>
                       <TableCell className='min-w-64 whitespace-normal'>
@@ -331,12 +346,10 @@ export function GrowthRewardItemsSection() {
                       <TableCell>
                         <Badge
                           variant={
-                            item.enabled === false ? 'outline' : 'default'
+                            item.effective_enabled ? 'default' : 'outline'
                           }
                         >
-                          {item.enabled === false
-                            ? t('Disabled')
-                            : t('Enabled')}
+                          {statusLabel}
                         </Badge>
                       </TableCell>
                       <TableCell className='text-right'>
@@ -391,13 +404,14 @@ export function GrowthRewardItemsSection() {
                 </div>
                 <Switch
                   checked={draft.enabled}
+                  aria-label={t('Task enabled')}
                   onCheckedChange={(checked) =>
                     updateDraft({ enabled: checked })
                   }
                 />
               </div>
 
-              {supportsRewardOverride(selectedItem) ? (
+              {selectedItem.capabilities.reward_override ? (
                 <div className='rounded-lg border p-3'>
                   <div className='flex items-start justify-between gap-4'>
                     <div className='flex min-w-0 flex-col gap-1'>
@@ -413,6 +427,7 @@ export function GrowthRewardItemsSection() {
                     <label className='flex shrink-0 items-center gap-2 text-xs'>
                       <Switch
                         checked={draft.custom_reward}
+                        aria-label={t('Use a task-specific reward')}
                         onCheckedChange={(checked) =>
                           updateDraft({ custom_reward: checked })
                         }
@@ -426,6 +441,7 @@ export function GrowthRewardItemsSection() {
                         {t('Custom reward quota')}
                       </label>
                       <Input
+                        aria-label={t('Custom reward quota')}
                         type='number'
                         min={1}
                         value={draft.reward_quota}
@@ -436,9 +452,9 @@ export function GrowthRewardItemsSection() {
                     </div>
                   ) : (
                     <div className='text-muted-foreground mt-3 text-xs'>
-                      {t(
-                        'This task inherits its quota from Promotion & Rewards.'
-                      )}
+                      {t('Current reward from the reward program: {{amount}}', {
+                        amount: rewardValueLabel(selectedItem),
+                      })}
                     </div>
                   )}
                 </div>
@@ -448,9 +464,9 @@ export function GrowthRewardItemsSection() {
                     {t('Reward source')}
                   </div>
                   <div className='text-muted-foreground mt-1 text-xs'>
-                    {t(
-                      'Daily check-in quota is configured in Promotion & Rewards.'
-                    )}
+                    {t('Current reward from the reward program: {{amount}}', {
+                      amount: rewardValueLabel(selectedItem),
+                    })}
                   </div>
                 </div>
               )}
@@ -487,15 +503,15 @@ function TaskSpecificFields({
   draft,
   updateDraft,
 }: {
-  item: GrowthRewardItem
+  item: AdminGrowthRewardItem
   draft: RewardItemDraft
   updateDraft: (patch: Partial<RewardItemDraft>) => void
 }) {
   const { t } = useTranslation()
-  const hasActionUrl = supportsActionUrl(item)
-  const hasIntroduction = supportsIntroduction(item)
-  const hasPassword = supportsClaimPassword(item)
-  const hasDailyLimit = supportsDailyLimit(item)
+  const hasActionUrl = item.capabilities.action_url
+  const hasIntroduction = item.capabilities.introduction
+  const hasPassword = item.capabilities.claim_password
+  const hasDailyLimit = item.capabilities.daily_limit
 
   if (!hasActionUrl && !hasIntroduction && !hasPassword && !hasDailyLimit) {
     return (
@@ -528,6 +544,7 @@ function TaskSpecificFields({
               {t('Task introduction')}
             </label>
             <Textarea
+              aria-label={t('Task introduction')}
               value={draft.introduction}
               onChange={(event) =>
                 updateDraft({ introduction: event.target.value })
@@ -545,24 +562,22 @@ function TaskSpecificFields({
 
         {hasActionUrl ? (
           <div className='grid gap-1.5'>
-            <label className='text-xs font-medium'>
-              {item.code === JOIN_COMMUNITY_CODE
-                ? t('Community link')
-                : t('Submission guide URL')}
-            </label>
+            <label className='text-xs font-medium'>{t('Community link')}</label>
             <div className='flex gap-2'>
               <Input
+                aria-label={t('Community link')}
                 value={draft.action_url}
                 onChange={(event) =>
                   updateDraft({ action_url: event.target.value })
                 }
                 placeholder='https://'
               />
-              {draft.action_url ? (
+              {/^(https?):\/\//i.test(draft.action_url) ? (
                 <Button
                   type='button'
                   variant='outline'
                   size='icon'
+                  aria-label={t('Open community link')}
                   render={
                     <a
                       href={draft.action_url}
@@ -584,6 +599,7 @@ function TaskSpecificFields({
               {t('New claim password')}
             </label>
             <Input
+              aria-label={t('New claim password')}
               type='password'
               value={draft.claim_password}
               onChange={(event) =>
@@ -598,8 +614,10 @@ function TaskSpecificFields({
           <div className='grid gap-1.5'>
             <label className='text-xs font-medium'>{t('Daily limit')}</label>
             <Input
+              aria-label={t('Daily limit')}
               type='number'
               min={0}
+              max={1000}
               value={draft.daily_limit}
               onChange={(event) =>
                 updateDraft({ daily_limit: event.target.value })

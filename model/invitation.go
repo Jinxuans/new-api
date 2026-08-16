@@ -49,26 +49,32 @@ type invitationRewardStatusRow struct {
 }
 
 func CalculateInvitationRebateAmount(totalTopUpAmount float64) float64 {
-	if totalTopUpAmount <= 0 || common.InviteRebatePercentage <= 0 {
+	percentage := operation_setting.GetInviteRebatePercentage()
+	if totalTopUpAmount <= 0 || percentage <= 0 {
 		return 0
 	}
 
 	return decimal.NewFromFloat(totalTopUpAmount).
-		Mul(decimal.NewFromFloat(common.InviteRebatePercentage)).
+		Mul(decimal.NewFromFloat(percentage)).
 		Div(decimal.NewFromInt(100)).
 		InexactFloat64()
 }
 
 func CalculateInvitationRebateQuota(totalTopUpAmount float64) int {
-	if totalTopUpAmount <= 0 || common.InviteRebatePercentage <= 0 || common.QuotaPerUnit <= 0 {
+	percentage := operation_setting.GetInviteRebatePercentage()
+	if totalTopUpAmount <= 0 || percentage <= 0 || common.QuotaPerUnit <= 0 || operation_setting.USDExchangeRate <= 0 {
 		return 0
 	}
 
-	return int(decimal.NewFromFloat(totalTopUpAmount).
-		Mul(decimal.NewFromFloat(common.InviteRebatePercentage)).
+	quota, clamp := common.QuotaFromDecimalChecked(decimal.NewFromFloat(totalTopUpAmount).
+		Mul(decimal.NewFromFloat(percentage)).
 		Div(decimal.NewFromInt(100)).
-		Mul(decimal.NewFromFloat(common.QuotaPerUnit)).
-		IntPart())
+		Div(decimal.NewFromFloat(operation_setting.USDExchangeRate)).
+		Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
+	if clamp != nil {
+		return 0
+	}
+	return quota
 }
 
 func GetUserInvitationRecords(inviterId int, pageInfo *common.PageInfo) (
@@ -120,6 +126,7 @@ func GetUserInvitationRecords(inviterId int, pageInfo *common.PageInfo) (
 			Select("top_ups.user_id, COUNT(*) AS count").
 			Joins("LEFT JOIN subscription_orders ON subscription_orders.trade_no = top_ups.trade_no").
 			Where("top_ups.user_id IN ? AND top_ups.status = ? AND subscription_orders.id IS NULL", inviteeIds, common.TopUpStatusSuccess).
+			Where("top_ups.refund_status IS NULL OR top_ups.refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Group("top_ups.user_id").
 			Scan(&topUpRows).Error
 		if err != nil {
@@ -169,7 +176,7 @@ func GetUserInvitationRecords(inviterId int, pageInfo *common.PageInfo) (
 			RegisterRewardQuota:         common.QuotaForInviter,
 			FirstRequestRuleRewardQuota: growthSetting.InviteFirstRequestRewardQuota,
 			FirstTopUpRuleRewardQuota:   growthSetting.InviteFirstTopUpRewardQuota,
-			InviteRebatePercentage:      common.InviteRebatePercentage,
+			InviteRebatePercentage:      operation_setting.GetInviteRebatePercentage(),
 		})
 	}
 

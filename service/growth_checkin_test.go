@@ -23,6 +23,7 @@ func withGrowthSetting(t *testing.T, fn func(setting *operation_setting.GrowthSe
 func TestClaimDailyCheckinCreatesRewardAndEvent(t *testing.T) {
 	truncate(t)
 	seedUser(t, 3101, 100)
+	require.NoError(t, model.EnsureDefaultGrowthRewardItems())
 	withGrowthSetting(t, func(setting *operation_setting.GrowthSetting) {
 		setting.DailyCheckinEnabled = true
 		setting.DailyCheckinMinRewardQuota = 200
@@ -52,6 +53,7 @@ func TestClaimDailyCheckinCreatesRewardAndEvent(t *testing.T) {
 func TestClaimDailyCheckinRespectsDailyBudget(t *testing.T) {
 	truncate(t)
 	seedUser(t, 3102, 100)
+	require.NoError(t, model.EnsureDefaultGrowthRewardItems())
 	withGrowthSetting(t, func(setting *operation_setting.GrowthSetting) {
 		setting.DailyCheckinEnabled = true
 		setting.DailyCheckinMinRewardQuota = 200
@@ -120,6 +122,7 @@ func TestGrowthSummaryIncludesInvitationGuideValue(t *testing.T) {
 	common.QuotaForInviter = 100
 	common.InviteRebatePercentage = 10
 	withGrowthSetting(t, func(setting *operation_setting.GrowthSetting) {
+		setting.InviteRebatePercentage = 10
 		setting.InviteFirstRequestRewardQuota = 200
 		setting.InviteFirstTopUpRewardQuota = 300
 	})

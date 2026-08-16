@@ -422,11 +422,17 @@ func handleWaffoPayment(c *gin.Context, wh *core.WebhookHandler, result *core.Pa
 	}
 
 	merchantOrderId := result.MerchantOrderID
+	payment, err := model.ParseVerifiedPayment(result.OrderAmount, result.OrderCurrency)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo 回调支付快照无效 trade_no=%s order_amount=%q order_currency=%q client_ip=%s error=%q", merchantOrderId, result.OrderAmount, result.OrderCurrency, c.ClientIP(), err.Error()))
+		sendWaffoWebhookResponse(c, wh, false, "invalid payment amount")
+		return
+	}
 
 	LockOrder(merchantOrderId)
 	defer UnlockOrder(merchantOrderId)
 
-	if err := model.RechargeWaffo(merchantOrderId, c.ClientIP()); err != nil {
+	if err := model.RechargeWaffo(merchantOrderId, payment, c.ClientIP()); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo 充值处理失败 trade_no=%s client_ip=%s error=%q", merchantOrderId, c.ClientIP(), err.Error()))
 		sendWaffoWebhookResponse(c, wh, false, err.Error())
 		return
@@ -437,19 +443,48 @@ func handleWaffoPayment(c *gin.Context, wh *core.WebhookHandler, result *core.Pa
 }
 
 func handleWaffoRefund(c *gin.Context, wh *core.WebhookHandler, result *core.RefundNotificationResult) {
-	if result.RefundStatus != core.RefundStatusFullyRefunded {
-		if result.RefundStatus == core.RefundStatusPartiallyRefunded {
-			logger.LogWarn(c.Request.Context(), fmt.Sprintf("Waffo 部分退款需人工核对推广返佣 trade_no=%s refund_request_id=%s refund_amount=%s client_ip=%s", result.OrigPaymentRequestID, result.RefundRequestID, result.RefundAmount, c.ClientIP()))
-		} else {
-			logger.LogInfo(c.Request.Context(), fmt.Sprintf("Waffo 退款状态未完成，忽略返佣冲正 trade_no=%s refund_request_id=%s refund_status=%s client_ip=%s", result.OrigPaymentRequestID, result.RefundRequestID, result.RefundStatus, c.ClientIP()))
-		}
+	if result.RefundStatus != core.RefundStatusFullyRefunded && result.RefundStatus != core.RefundStatusPartiallyRefunded {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("Waffo 退款状态未完成，忽略返佣冲正 trade_no=%s refund_request_id=%s refund_status=%s client_ip=%s", result.OrigPaymentRequestID, result.RefundRequestID, result.RefundStatus, c.ClientIP()))
 		sendWaffoWebhookResponse(c, wh, true, "")
 		return
 	}
 
 	tradeNo := firstNonEmptyString(result.OrigPaymentRequestID, result.AcquiringOrderID)
 	refundTradeNo := firstNonEmptyString(result.RefundRequestID, result.AcquiringRefundOrderID, core.EventRefund)
-	reverseInvitationRebateByTradeNoFromWebhook(c.Request.Context(), model.PaymentProviderWaffo, tradeNo, refundTradeNo, "waffo refund")
+	topUp := model.GetTopUpByTradeNo(tradeNo)
+	currency := result.UserCurrency
+	paidAmountMinor := int64(0)
+	if topUp != nil && topUp.PaidAmountVerified {
+		currency = topUp.PaidCurrency
+		paidAmountMinor = topUp.PaidAmountMinor
+	}
+	refundedAmountMinor := int64(0)
+	if result.RefundAmount != "" && currency != "" {
+		payment, err := model.ParseVerifiedPayment(result.RefundAmount, currency)
+		if err != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo 退款金额无效 trade_no=%s refund_amount=%q currency=%q error=%q", tradeNo, result.RefundAmount, currency, err.Error()))
+			sendWaffoWebhookResponse(c, wh, false, "invalid refund amount")
+			return
+		}
+		refundedAmountMinor = payment.AmountMinor
+	}
+	kind := model.PromotionRefundKindFull
+	if result.RefundStatus == core.RefundStatusPartiallyRefunded {
+		kind = model.PromotionRefundKindPartial
+	}
+	if err := handlePromotionRefundFromWebhook(c.Request.Context(), model.PromotionRefundInput{
+		Provider:            model.PaymentProviderWaffo,
+		TradeNo:             tradeNo,
+		RefundTradeNo:       refundTradeNo,
+		Kind:                kind,
+		PaidAmountMinor:     paidAmountMinor,
+		RefundedAmountMinor: refundedAmountMinor,
+		Currency:            currency,
+		Remark:              "waffo refund",
+	}); err != nil {
+		sendWaffoWebhookResponse(c, wh, false, err.Error())
+		return
+	}
 	sendWaffoWebhookResponse(c, wh, true, "")
 }
 

@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -28,9 +29,15 @@ type InvitationRebate struct {
 	TopUpMoney           float64 `json:"top_up_money"`
 	PaymentMethod        string  `json:"payment_method" gorm:"type:varchar(50);index"`
 	PaymentProvider      string  `json:"payment_provider" gorm:"type:varchar(50);index"`
+	PaidAmountMinor      int64   `json:"paid_amount_minor"`
+	PaidCurrency         string  `json:"paid_currency" gorm:"type:varchar(3);index"`
+	PaidAmountVerified   bool    `json:"paid_amount_verified"`
 	RebatePercentage     float64 `json:"rebate_percentage"`
 	QuotaPerUnitSnapshot float64 `json:"quota_per_unit_snapshot"`
 	RebateAmount         float64 `json:"rebate_amount"`
+	RebateAmountMinor    int64   `json:"rebate_amount_minor"`
+	RebateCurrency       string  `json:"rebate_currency" gorm:"type:varchar(3);index"`
+	Cashable             bool    `json:"cashable"`
 	RebateQuota          int     `json:"rebate_quota"`
 	FreezeDays           int     `json:"freeze_days"`
 	SettleAfter          int64   `json:"settle_after" gorm:"index"`
@@ -54,9 +61,15 @@ type UserInvitationRebateRecord struct {
 	TopUpMoney           float64 `json:"top_up_money"`
 	PaymentMethod        string  `json:"payment_method"`
 	PaymentProvider      string  `json:"payment_provider"`
+	PaidAmountMinor      int64   `json:"paid_amount_minor"`
+	PaidCurrency         string  `json:"paid_currency"`
+	PaidAmountVerified   bool    `json:"paid_amount_verified"`
 	RebatePercentage     float64 `json:"rebate_percentage"`
 	QuotaPerUnitSnapshot float64 `json:"quota_per_unit_snapshot"`
 	RebateAmount         float64 `json:"rebate_amount"`
+	RebateAmountMinor    int64   `json:"rebate_amount_minor"`
+	RebateCurrency       string  `json:"rebate_currency"`
+	Cashable             bool    `json:"cashable"`
 	RebateQuota          int     `json:"rebate_quota"`
 	FreezeDays           int     `json:"freeze_days"`
 	SettleAfter          int64   `json:"settle_after"`
@@ -80,12 +93,23 @@ func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, err
 	if topUp.Id == 0 || topUp.Status != common.TopUpStatusSuccess {
 		return nil, nil
 	}
-	if topUp.Money <= 0 || common.InviteRebatePercentage <= 0 {
+	if topUp.RefundStatus == TopUpRefundStatusFull || topUp.RefundStatus == TopUpRefundStatusDisputed {
+		return nil, nil
+	}
+	percentage := operation_setting.GetInviteRebatePercentage()
+	if !operation_setting.IsPaymentComplianceConfirmed() || percentage <= 0 || percentage > 100 || math.IsNaN(percentage) || math.IsInf(percentage, 0) {
+		return nil, nil
+	}
+	calculation, err := calculateInvitationRebate(topUp, percentage)
+	if err != nil {
+		return nil, err
+	}
+	if calculation == nil {
 		return nil, nil
 	}
 
 	var existing InvitationRebate
-	err := tx.Where("top_up_id = ?", topUp.Id).First(&existing).Error
+	err = tx.Where("top_up_id = ?", topUp.Id).First(&existing).Error
 	if err == nil {
 		if existing.Status == InvitationRebateStatusPending && existing.SettleAfter <= common.GetTimestamp() {
 			if err = settleInvitationRebateTx(tx, &existing, common.GetTimestamp()); err != nil {
@@ -106,11 +130,6 @@ func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, err
 		return nil, nil
 	}
 
-	rebateAmount := CalculateInvitationRebateAmount(topUp.Money)
-	if rebateAmount <= 0 {
-		return nil, nil
-	}
-	rebateQuota := CalculateInvitationRebateQuota(topUp.Money)
 	createdAt := topUp.CompleteTime
 	if createdAt == 0 {
 		createdAt = common.GetTimestamp()
@@ -136,19 +155,32 @@ func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, err
 		InviteeId:            invitee.Id,
 		TopUpId:              topUp.Id,
 		TradeNo:              topUp.TradeNo,
-		TopUpMoney:           topUp.Money,
+		TopUpMoney:           calculation.paidAmountMajor.InexactFloat64(),
 		PaymentMethod:        topUp.PaymentMethod,
 		PaymentProvider:      topUp.PaymentProvider,
-		RebatePercentage:     common.InviteRebatePercentage,
+		PaidAmountMinor:      calculation.paidAmountMinor,
+		PaidCurrency:         calculation.paidCurrency,
+		PaidAmountVerified:   calculation.paidAmountVerified,
+		RebatePercentage:     percentage,
 		QuotaPerUnitSnapshot: common.QuotaPerUnit,
-		RebateAmount:         rebateAmount,
-		RebateQuota:          rebateQuota,
+		RebateAmount:         calculation.rebateAmount.InexactFloat64(),
+		RebateAmountMinor:    calculation.rebateAmountMinor,
+		RebateCurrency:       calculation.rebateCurrency,
+		Cashable:             calculation.cashable,
+		RebateQuota:          calculation.rebateQuota,
 		FreezeDays:           freezeDays,
 		SettleAfter:          settleAfter,
-		RuleSnapshot:         buildInvitationRebateRuleSnapshot(common.InviteRebatePercentage, common.QuotaPerUnit, freezeDays),
+		RuleSnapshot:         buildInvitationRebateRuleSnapshot(percentage, common.QuotaPerUnit, freezeDays, calculation),
 		Status:               status,
 		CreatedAt:            createdAt,
 		SettledAt:            settledAt,
+	}
+	if !calculation.paidAmountVerified {
+		rebate.RiskStatus = "unverified_payment"
+		rebate.Remark = "cash commission requires a verified provider payment snapshot"
+	} else if !calculation.cashable {
+		rebate.RiskStatus = "unsupported_currency"
+		rebate.Remark = fmt.Sprintf("cash commission is not supported for %s payments", calculation.paidCurrency)
 	}
 	if err = tx.Create(rebate).Error; err != nil {
 		return nil, err
@@ -161,11 +193,114 @@ func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, err
 	return rebate, nil
 }
 
-func buildInvitationRebateRuleSnapshot(rebatePercentage float64, quotaPerUnit float64, freezeDays int) string {
+type invitationRebateCalculation struct {
+	paidAmountMajor    decimal.Decimal
+	paidAmountMinor    int64
+	paidCurrency       string
+	paidAmountVerified bool
+	rebateAmount       decimal.Decimal
+	rebateAmountMinor  int64
+	rebateCurrency     string
+	rebateQuota        int
+	cashable           bool
+	usdToCny           float64
+}
+
+func calculateInvitationRebate(topUp *TopUp, percentage float64) (*invitationRebateCalculation, error) {
+	if topUp == nil || percentage <= 0 || percentage > 100 || math.IsNaN(percentage) || math.IsInf(percentage, 0) {
+		return nil, nil
+	}
+
+	payment, verified := topUp.verifiedPayment()
+	if !verified {
+		if topUp.Money <= 0 || math.IsNaN(topUp.Money) || math.IsInf(topUp.Money, 0) {
+			return nil, nil
+		}
+		payment = VerifiedPayment{Currency: "CNY"}
+	}
+	paidAmount := payment.majorAmount()
+	if !verified {
+		paidAmount = decimal.NewFromFloat(topUp.Money)
+	}
+	percentageDecimal := decimal.NewFromFloat(percentage).Div(decimal.NewFromInt(100))
+	sourceRebate := paidAmount.Mul(percentageDecimal)
+	if !sourceRebate.IsPositive() {
+		return nil, nil
+	}
+
+	calculation := &invitationRebateCalculation{
+		paidAmountMajor:    paidAmount,
+		paidAmountMinor:    payment.AmountMinor,
+		paidCurrency:       payment.Currency,
+		paidAmountVerified: verified,
+		rebateCurrency:     payment.Currency,
+		rebateAmount:       sourceRebate,
+		cashable:           false,
+	}
+	if !verified {
+		calculation.paidCurrency = "CNY"
+	}
+
+	sourceRebateMinor := sourceRebate.Shift(int32(paymentCurrencyExponent(calculation.paidCurrency))).Round(0)
+	if sourceRebateMinor.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
+		return nil, ErrInvalidVerifiedPayment
+	}
+	calculation.rebateAmountMinor = sourceRebateMinor.IntPart()
+
+	usdToCny := operation_setting.USDExchangeRate
+	if usdToCny <= 0 || math.IsNaN(usdToCny) || math.IsInf(usdToCny, 0) {
+		return calculation, nil
+	}
+	calculation.usdToCny = usdToCny
+
+	var rebateUSD decimal.Decimal
+	switch calculation.paidCurrency {
+	case "CNY":
+		rebateUSD = sourceRebate.Div(decimal.NewFromFloat(usdToCny))
+		calculation.rebateCurrency = "CNY"
+		calculation.cashable = true
+	case "USD":
+		rebateUSD = sourceRebate
+		calculation.rebateAmount = sourceRebate.Mul(decimal.NewFromFloat(usdToCny))
+		amountMinor := calculation.rebateAmount.Shift(2).Round(0)
+		if amountMinor.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
+			return nil, ErrInvalidVerifiedPayment
+		}
+		calculation.rebateAmountMinor = amountMinor.IntPart()
+		calculation.rebateCurrency = "CNY"
+		calculation.cashable = true
+	default:
+		return calculation, nil
+	}
+
+	rebateQuota, err := common.QuotaFromDecimalStrict(rebateUSD.Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
+	if err != nil {
+		return nil, err
+	}
+	if rebateQuota <= 0 {
+		return nil, nil
+	}
+	calculation.rebateQuota = rebateQuota
+	if !verified {
+		calculation.cashable = false
+	}
+	return calculation, nil
+}
+
+func buildInvitationRebateRuleSnapshot(rebatePercentage float64, quotaPerUnit float64, freezeDays int, calculation *invitationRebateCalculation) string {
 	snapshot := map[string]interface{}{
 		"invite_rebate_percentage": rebatePercentage,
 		"quota_per_unit":           quotaPerUnit,
 		"rebate_freeze_days":       freezeDays,
+	}
+	if calculation != nil {
+		snapshot["paid_amount_verified"] = calculation.paidAmountVerified
+		snapshot["paid_currency"] = calculation.paidCurrency
+		snapshot["rebate_currency"] = calculation.rebateCurrency
+		snapshot["cashable"] = calculation.cashable
+		if calculation.usdToCny > 0 {
+			snapshot["usd_exchange_rate"] = calculation.usdToCny
+		}
 	}
 	data, err := common.Marshal(snapshot)
 	if err != nil {
@@ -174,28 +309,15 @@ func buildInvitationRebateRuleSnapshot(rebatePercentage float64, quotaPerUnit fl
 	return string(data)
 }
 
-func increaseInvitationRebateQuotaTx(tx *gorm.DB, inviterId int, rebateQuota int) error {
-	if rebateQuota <= 0 {
-		return nil
-	}
-	return tx.Model(&User{}).
-		Where("id = ?", inviterId).
-		Updates(map[string]interface{}{
-			"aff_quota":   gorm.Expr("aff_quota + ?", rebateQuota),
-			"aff_history": gorm.Expr("aff_history + ?", rebateQuota),
-		}).Error
-}
-
 func createPromotionCommissionLedgerForRebateTx(tx *gorm.DB, rebate *InvitationRebate, topUp *TopUp) error {
 	if rebate == nil || topUp == nil {
 		return nil
 	}
-	grossAmountCents := decimal.NewFromFloat(topUp.Money).
-		Mul(decimal.NewFromFloat(rebate.RebatePercentage)).
-		Div(decimal.NewFromInt(100)).
-		Mul(decimal.NewFromInt(100)).
-		Round(0).
-		IntPart()
+	if !rebate.Cashable {
+		common.SysLog(fmt.Sprintf("promotion commission skipped for non-cashable rebate: top_up_id=%d risk_status=%s currency=%s", topUp.Id, rebate.RiskStatus, rebate.PaidCurrency))
+		return nil
+	}
+	grossAmountCents := rebate.RebateAmountMinor
 	if grossAmountCents <= 0 {
 		return nil
 	}
@@ -206,12 +328,13 @@ func createPromotionCommissionLedgerForRebateTx(tx *gorm.DB, rebate *InvitationR
 		settledAt = rebate.SettledAt
 	}
 	paymentSnapshot, err := common.Marshal(map[string]interface{}{
-		"top_up_id":        topUp.Id,
-		"trade_no":         topUp.TradeNo,
-		"paid_amount":      topUp.Money,
-		"paid_currency":    "CNY",
-		"payment_method":   topUp.PaymentMethod,
-		"payment_provider": topUp.PaymentProvider,
+		"top_up_id":            topUp.Id,
+		"trade_no":             topUp.TradeNo,
+		"paid_amount_minor":    rebate.PaidAmountMinor,
+		"paid_currency":        rebate.PaidCurrency,
+		"paid_amount_verified": rebate.PaidAmountVerified,
+		"payment_method":       topUp.PaymentMethod,
+		"payment_provider":     topUp.PaymentProvider,
 	})
 	if err != nil {
 		return err
@@ -222,8 +345,8 @@ func createPromotionCommissionLedgerForRebateTx(tx *gorm.DB, rebate *InvitationR
 		SourceType:       PromotionCommissionSourceTopUpRebate,
 		SourceId:         rebate.Id,
 		SourceTradeNo:    rebate.TradeNo,
-		Cashable:         true,
-		Currency:         "CNY",
+		Cashable:         rebate.Cashable,
+		Currency:         rebate.RebateCurrency,
 		GrossAmountCents: grossAmountCents,
 		NetAmountCents:   grossAmountCents,
 		QuotaEquivalent:  rebate.RebateQuota,
@@ -232,6 +355,7 @@ func createPromotionCommissionLedgerForRebateTx(tx *gorm.DB, rebate *InvitationR
 		SettledAt:        settledAt,
 		RuleSnapshot:     rebate.RuleSnapshot,
 		PaymentSnapshot:  string(paymentSnapshot),
+		Remark:           rebate.Remark,
 		CreatedAt:        rebate.CreatedAt,
 	}
 	return CreatePromotionCommissionLedgerTx(tx, ledger)
@@ -267,7 +391,7 @@ func settleInvitationRebateTx(tx *gorm.DB, rebate *InvitationRebate, settledAt i
 	return nil
 }
 
-func settleDueInvitationRebatesForInviter(inviterId int) error {
+func SettleDueInvitationRebatesForInviter(inviterId int) error {
 	if inviterId <= 0 {
 		return nil
 	}
@@ -286,7 +410,7 @@ func settleDueInvitationRebatesForInviter(inviterId int) error {
 		for _, rebate := range rebates {
 			if err := DB.Transaction(func(tx *gorm.DB) error {
 				lockedRebate := &InvitationRebate{}
-				if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ?", rebate.Id).First(lockedRebate).Error; err != nil {
+				if err := lockForUpdate(tx).Where("id = ?", rebate.Id).First(lockedRebate).Error; err != nil {
 					return err
 				}
 				return settleInvitationRebateTx(tx, lockedRebate, now)
@@ -305,7 +429,7 @@ func ReverseInvitationRebateByTopUpTx(tx *gorm.DB, topUpId int, refundTradeNo st
 		return nil, nil
 	}
 	rebate := &InvitationRebate{}
-	if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("top_up_id = ?", topUpId).First(rebate).Error; err != nil {
+	if err := lockForUpdate(tx).Where("top_up_id = ?", topUpId).First(rebate).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -318,16 +442,20 @@ func ReverseInvitationRebateByTopUpTx(tx *gorm.DB, topUpId int, refundTradeNo st
 	now := common.GetTimestamp()
 	reversalQuota := rebate.RebateQuota
 
-	if err := tx.Model(&InvitationRebate{}).
-		Where("id = ?", rebate.Id).
+	result := tx.Model(&InvitationRebate{}).
+		Where("id = ? AND status = ?", rebate.Id, rebate.Status).
 		Updates(map[string]interface{}{
 			"status":          InvitationRebateStatusReversed,
 			"refund_trade_no": refundTradeNo,
 			"reversal_quota":  reversalQuota,
 			"reversed_at":     now,
 			"remark":          remark,
-		}).Error; err != nil {
-		return nil, err
+		})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, errors.New("invitation rebate status changed, please retry")
 	}
 	if err := ReversePromotionCommissionLedgerTx(tx, PromotionCommissionSourceTopUpRebate, rebate.Id, refundTradeNo, remark); err != nil {
 		return nil, err
@@ -350,6 +478,9 @@ func ReverseInvitationRebateByTopUp(topUpId int, refundTradeNo string, remark st
 		rebate = reversedRebate
 		return nil
 	})
+	if err == nil && rebate != nil {
+		_ = InvalidateUserCache(rebate.InviterId)
+	}
 	return rebate, err
 }
 
@@ -360,7 +491,7 @@ func ReverseInvitationRebateByTradeNo(tradeNo string, refundTradeNo string, rema
 	var rebate *InvitationRebate
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		topUp := &TopUp{}
-		err := tx.Set("gorm:query_option", "FOR UPDATE").Where("trade_no = ?", tradeNo).First(topUp).Error
+		err := lockForUpdate(tx).Where("trade_no = ?", tradeNo).First(topUp).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
@@ -374,6 +505,9 @@ func ReverseInvitationRebateByTradeNo(tradeNo string, refundTradeNo string, rema
 		rebate = reversedRebate
 		return nil
 	})
+	if err == nil && rebate != nil {
+		_ = InvalidateUserCache(rebate.InviterId)
+	}
 	return rebate, err
 }
 
@@ -437,21 +571,22 @@ func SyncInvitationRebatesForInviter(inviterId int) error {
 	if inviterId <= 0 {
 		return nil
 	}
-	if err := settleDueInvitationRebatesForInviter(inviterId); err != nil {
+	if err := SettleDueInvitationRebatesForInviter(inviterId); err != nil {
 		return err
 	}
-	if common.InviteRebatePercentage <= 0 {
+	if operation_setting.GetInviteRebatePercentage() <= 0 || !operation_setting.IsPaymentComplianceConfirmed() {
 		return nil
 	}
 
 	for {
 		var topUps []TopUp
 		err := DB.Table("top_ups").
-			Select("top_ups.id, top_ups.user_id, top_ups.amount, top_ups.money, top_ups.trade_no, top_ups.payment_method, top_ups.payment_provider, top_ups.create_time, top_ups.complete_time, top_ups.status").
+			Select("top_ups.id, top_ups.user_id, top_ups.amount, top_ups.money, top_ups.paid_amount_minor, top_ups.paid_currency, top_ups.paid_amount_verified, top_ups.trade_no, top_ups.payment_method, top_ups.payment_provider, top_ups.create_time, top_ups.complete_time, top_ups.status").
 			Joins("INNER JOIN users ON users.id = top_ups.user_id").
 			Joins("LEFT JOIN invitation_rebates ON invitation_rebates.top_up_id = top_ups.id").
 			Joins("LEFT JOIN subscription_orders ON subscription_orders.trade_no = top_ups.trade_no").
 			Where("users.inviter_id = ? AND top_ups.status = ? AND invitation_rebates.id IS NULL AND subscription_orders.id IS NULL", inviterId, common.TopUpStatusSuccess).
+			Where("top_ups.refund_status IS NULL OR top_ups.refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Order("top_ups.id ASC").
 			Limit(200).
 			Scan(&topUps).Error
@@ -465,7 +600,7 @@ func SyncInvitationRebatesForInviter(inviterId int) error {
 		for _, topUp := range topUps {
 			err = DB.Transaction(func(tx *gorm.DB) error {
 				lockedTopUp := &TopUp{}
-				if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ?", topUp.Id).First(lockedTopUp).Error; err != nil {
+				if err := lockForUpdate(tx).Where("id = ?", topUp.Id).First(lockedTopUp).Error; err != nil {
 					return err
 				}
 				_, err := SettleInvitationRebateTx(tx, lockedTopUp)

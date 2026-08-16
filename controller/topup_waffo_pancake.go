@@ -475,7 +475,13 @@ func WaffoPancakeWebhook(c *gin.Context) {
 	}
 
 	logger.LogInfo(c.Request.Context(), fmt.Sprintf("Waffo Pancake webhook 验签成功 event_type=%s event_id=%s order_id=%s client_ip=%s", event.NormalizedEventType(), event.ID, event.Data.OrderID, c.ClientIP()))
-	if event.NormalizedEventType() != "order.completed" {
+	switch event.NormalizedEventType() {
+	case "refund.succeeded":
+		handleWaffoPancakeRefund(c, event)
+		return
+	case "order.completed":
+		// Continue below.
+	default:
 		c.String(http.StatusOK, "OK")
 		return
 	}
@@ -523,12 +529,72 @@ func WaffoPancakeWebhook(c *gin.Context) {
 	LockOrder(tradeNo)
 	defer UnlockOrder(tradeNo)
 
-	if err := model.RechargeWaffoPancake(tradeNo); err != nil {
+	payment, err := model.ParseVerifiedPayment(event.Data.Amount, event.Data.Currency)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 回调支付快照无效 trade_no=%s amount=%q currency=%q event_id=%s error=%q", tradeNo, event.Data.Amount, event.Data.Currency, event.ID, err.Error()))
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
+	if err := model.RechargeWaffoPancake(tradeNo, payment); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 充值处理失败 trade_no=%s event_id=%s order_id=%s client_ip=%s error=%q", tradeNo, event.ID, event.Data.OrderID, c.ClientIP(), err.Error()))
 		c.String(http.StatusInternalServerError, "retry")
 		return
 	}
 
 	logger.LogInfo(c.Request.Context(), fmt.Sprintf("Waffo Pancake 充值成功 trade_no=%s event_id=%s order_id=%s client_ip=%s", tradeNo, event.ID, event.Data.OrderID, c.ClientIP()))
+	c.String(http.StatusOK, "OK")
+}
+
+func handleWaffoPancakeRefund(c *gin.Context, event *service.WaffoPancakeWebhookEvent) {
+	tradeNo := strings.TrimSpace(event.Data.OrderMerchantExternalID)
+	if strings.HasPrefix(tradeNo, "WAFFO_PANCAKE_SUB-") {
+		c.String(http.StatusOK, "OK")
+		return
+	}
+	resolvedTradeNo, err := service.ResolveWaffoPancakeTradeNo(event)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 退款订单解析失败 event_id=%s order_id=%s client_ip=%s error=%q", event.ID, event.Data.OrderID, c.ClientIP(), err.Error()))
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
+
+	refundPayment, err := model.ParseVerifiedPayment(event.Data.Amount, event.Data.Currency)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 退款金额无效 trade_no=%s amount=%q currency=%q event_id=%s error=%q", resolvedTradeNo, event.Data.Amount, event.Data.Currency, event.ID, err.Error()))
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
+	topUp := model.GetTopUpByTradeNo(resolvedTradeNo)
+	if topUp == nil {
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
+
+	paidAmountMinor := int64(0)
+	kind := model.PromotionRefundKindPartial
+	if topUp.PaidAmountVerified && topUp.PaidCurrency == refundPayment.Currency {
+		paidAmountMinor = topUp.PaidAmountMinor
+		if refundPayment.AmountMinor == topUp.PaidAmountMinor {
+			kind = model.PromotionRefundKindFull
+		}
+	}
+	refundTradeNo := firstNonEmptyString(
+		strings.TrimSpace(event.Data.RefundTicketMerchantExternalID),
+		strings.TrimSpace(event.EventID),
+		strings.TrimSpace(event.ID),
+	)
+	if err := handlePromotionRefundFromWebhook(c.Request.Context(), model.PromotionRefundInput{
+		Provider:            model.PaymentProviderWaffoPancake,
+		TradeNo:             resolvedTradeNo,
+		RefundTradeNo:       refundTradeNo,
+		Kind:                kind,
+		PaidAmountMinor:     paidAmountMinor,
+		RefundedAmountMinor: refundPayment.AmountMinor,
+		Currency:            refundPayment.Currency,
+		Remark:              firstNonEmptyString(strings.TrimSpace(event.Data.RefundReason), "waffo pancake refund"),
+	}); err != nil {
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
 	c.String(http.StatusOK, "OK")
 }

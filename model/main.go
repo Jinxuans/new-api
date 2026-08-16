@@ -281,8 +281,10 @@ func migrateDB() error {
 		&PromotionCommissionLedger{},
 		&PromotionWithdrawal{},
 		&PromotionWithdrawalItem{},
+		&PromotionRefundCase{},
 		&GrowthRewardItem{},
 		&GrowthReward{},
+		&GrowthRewardBudget{},
 		&GrowthSubmission{},
 		&QuotaData{},
 		&Task{},
@@ -306,6 +308,12 @@ func migrateDB() error {
 		&AuthzRole{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
+		return err
+	}
+	if err := EnsureDefaultGrowthRewardItems(); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
@@ -356,8 +364,10 @@ func migrateDBFast() error {
 		{&PromotionCommissionLedger{}, "PromotionCommissionLedger"},
 		{&PromotionWithdrawal{}, "PromotionWithdrawal"},
 		{&PromotionWithdrawalItem{}, "PromotionWithdrawalItem"},
+		{&PromotionRefundCase{}, "PromotionRefundCase"},
 		{&GrowthRewardItem{}, "GrowthRewardItem"},
 		{&GrowthReward{}, "GrowthReward"},
+		{&GrowthRewardBudget{}, "GrowthRewardBudget"},
 		{&GrowthSubmission{}, "GrowthSubmission"},
 		{&QuotaData{}, "QuotaData"},
 		{&Task{}, "Task"},
@@ -400,6 +410,12 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
+		return err
+	}
+	if err := EnsureDefaultGrowthRewardItems(); err != nil {
+		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err

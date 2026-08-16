@@ -18,17 +18,16 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { parseCurrencyDisplayType } from '@/lib/currency'
 
-import { CheckinSettingsSection } from '../general/checkin-settings-section'
-import { GrowthRewardItemsSection } from '../general/growth-reward-items-section'
-import { GrowthSettingsSection } from '../general/growth-settings-section'
-import { GrowthSubmissionsReviewSection } from '../general/growth-submissions-review-section'
-import { GrowthWithdrawalsReviewSection } from '../general/growth-withdrawals-review-section'
 import { PricingSection } from '../general/pricing-section'
 import { QuotaSettingsSection } from '../general/quota-settings-section'
 import { PaymentSettingsSection } from '../integrations/payment-settings-section'
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import {
+  ReferralProgramAdminSection,
+  RewardProgramAdminSection,
+} from './growth-program-sections'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -66,9 +65,6 @@ const BILLING_SECTIONS = [
         defaultValues={{
           QuotaForNewUser: settings.QuotaForNewUser,
           PreConsumedQuota: settings.PreConsumedQuota,
-          QuotaForInviter: settings.QuotaForInviter,
-          QuotaForInvitee: settings.QuotaForInvitee,
-          InviteRebatePercentage: settings.InviteRebatePercentage,
           TopUpLink: settings.TopUpLink,
           general_setting: {
             docs_link: settings['general_setting.docs_link'],
@@ -78,10 +74,6 @@ const BILLING_SECTIONS = [
               settings['quota_setting.enable_free_model_pre_consume'],
           },
         }}
-        complianceConfirmed={
-          (settings['payment_setting.compliance_confirmed'] ?? false) &&
-          settings['payment_setting.compliance_terms_version'] === 'v1'
-        }
       />
     ),
   },
@@ -195,25 +187,10 @@ const BILLING_SECTIONS = [
     ),
   },
   {
-    id: 'checkin',
-    titleKey: 'Check-in Rewards',
+    id: 'reward-program',
+    titleKey: 'Reward Program',
     build: (settings: BillingSettings) => (
-      <CheckinSettingsSection
-        defaultValues={{
-          enabled: settings['growth_setting.daily_checkin_enabled'],
-          minQuota: settings['growth_setting.daily_checkin_min_reward_quota'],
-          maxQuota: settings['growth_setting.daily_checkin_max_reward_quota'],
-        }}
-      />
-    ),
-  },
-  {
-    id: 'growth',
-    titleKey: 'Promotion & Rewards',
-    descriptionKey:
-      'Configure activation, retention, referral, and content rewards.',
-    build: (settings: BillingSettings) => (
-      <GrowthSettingsSection
+      <RewardProgramAdminSection
         defaultValues={{
           enabled: settings['growth_setting.enabled'],
           dailyCheckinEnabled: settings['growth_setting.daily_checkin_enabled'],
@@ -233,12 +210,6 @@ const BILLING_SECTIONS = [
             settings['growth_setting.monthly_spend_reward_quota'],
           monthlySpendTargetQuota:
             settings['growth_setting.monthly_spend_target_quota'],
-          inviteRebatePercentage: settings.InviteRebatePercentage,
-          inviteFirstRequestRewardQuota:
-            settings['growth_setting.invite_first_request_reward_quota'],
-          inviteFirstTopUpRewardQuota:
-            settings['growth_setting.invite_first_topup_reward_quota'],
-          rebateFreezeDays: settings['growth_setting.rebate_freeze_days'],
           userDailyRewardLimitQuota:
             settings['growth_setting.user_daily_reward_limit_quota'],
           siteDailyBudgetQuota:
@@ -253,30 +224,27 @@ const BILLING_SECTIONS = [
     ),
   },
   {
-    id: 'growth-reviews',
-    titleKey: 'Content Reward Reviews',
-    descriptionKey: 'Review promotion proof submissions and settle rewards.',
+    id: 'referral-program',
+    titleKey: 'Referral Program',
     build: (settings: BillingSettings) => (
-      <GrowthSubmissionsReviewSection
-        defaultRewardQuota={
-          settings['growth_setting.submission_min_reward_quota']
+      <ReferralProgramAdminSection
+        defaultValues={{
+          inviterRegistrationRewardQuota: settings.QuotaForInviter,
+          inviteeRegistrationRewardQuota: settings.QuotaForInvitee,
+          inviteRebatePercentage:
+            settings['growth_setting.invite_rebate_percentage'],
+          inviteFirstRequestRewardQuota:
+            settings['growth_setting.invite_first_request_reward_quota'],
+          inviteFirstTopUpRewardQuota:
+            settings['growth_setting.invite_first_topup_reward_quota'],
+          rebateFreezeDays: settings['growth_setting.rebate_freeze_days'],
+        }}
+        complianceConfirmed={
+          (settings['payment_setting.compliance_confirmed'] ?? false) &&
+          settings['payment_setting.compliance_terms_version'] === 'v1'
         }
       />
     ),
-  },
-  {
-    id: 'growth-items',
-    titleKey: 'Reward Task Items',
-    descriptionKey:
-      'Control task visibility and task-specific settings. Global reward rules stay in Promotion & Rewards.',
-    build: () => <GrowthRewardItemsSection />,
-  },
-  {
-    id: 'growth-withdrawals',
-    titleKey: 'Withdrawal Reviews',
-    descriptionKey:
-      'Review cash commission withdrawal requests and update payout status.',
-    build: () => <GrowthWithdrawalsReviewSection />,
   },
 ] as const
 

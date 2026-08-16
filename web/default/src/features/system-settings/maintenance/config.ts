@@ -71,7 +71,6 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
   personal: {
     enabled: true,
     topup: true,
-    rewards: true,
     promotion: true,
     personal: true,
   },
@@ -229,24 +228,19 @@ export function parseSidebarModulesAdmin(
         const parsedSection = parsed[sectionKey]
         if (parsedSection && typeof parsedSection === 'object') {
           const parsedRecord = parsedSection as Record<string, unknown>
-          if (
-            parsedRecord.invite !== undefined &&
-            parsedRecord.rewards === undefined
-          ) {
-            result[sectionKey].rewards = toBoolean(
-              parsedRecord.invite,
-              config.rewards ?? true
-            )
-          }
-          if (
-            parsedRecord.invite !== undefined &&
-            parsedRecord.promotion === undefined
-          ) {
-            result[sectionKey].promotion = toBoolean(
-              parsedRecord.invite,
-              config.promotion ?? true
-            )
-          }
+          const hasLegacyPromotion =
+            parsedRecord.rewards !== undefined ||
+            parsedRecord.invite !== undefined
+          const legacyValue = hasLegacyPromotion
+            ? toBoolean(parsedRecord.rewards, false) ||
+              toBoolean(parsedRecord.invite, false)
+            : undefined
+          result[sectionKey].promotion = toBoolean(
+            parsedRecord.promotion ?? legacyValue,
+            config.promotion ?? true
+          )
+          delete result[sectionKey].rewards
+          delete result[sectionKey].invite
         }
       }
 

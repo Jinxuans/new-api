@@ -15,7 +15,10 @@ const (
 	InvitationRewardTypeFirstRequest = "first_request"
 	InvitationRewardTypeFirstTopUp   = "first_topup"
 	InvitationRewardStatusSettled    = "settled"
+	InvitationRewardStatusReversed   = "reversed"
 )
+
+var ErrInvitationRewardQuotaLimitExceeded = errors.New("invitation reward quota limit exceeded")
 
 type InvitationReward struct {
 	Id             int    `json:"id"`
@@ -72,6 +75,11 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		return nil, nil
 	}
 
+	var inviter User
+	if err := lockForUpdate(tx).Select("id").Where("id = ?", invitee.InviterId).First(&inviter).Error; err != nil {
+		return nil, err
+	}
+
 	var existing InvitationReward
 	err := tx.Where("invitee_id = ? AND reward_type = ?", inviteeId, rewardType).First(&existing).Error
 	if err == nil {
@@ -87,6 +95,7 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		var successTopUpCount int64
 		if err := tx.Model(&TopUp{}).
 			Where("user_id = ? AND status = ?", inviteeId, common.TopUpStatusSuccess).
+			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Count(&successTopUpCount).Error; err != nil {
 			return nil, err
 		}
@@ -96,6 +105,7 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		var topUp TopUp
 		if err := tx.Select("id", "trade_no", "complete_time", "create_time").
 			Where("user_id = ? AND status = ?", inviteeId, common.TopUpStatusSuccess).
+			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Order("id ASC").
 			First(&topUp).Error; err != nil {
 			return nil, err
@@ -123,15 +133,14 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		CreatedAt:      now,
 		SettledAt:      now,
 	}
-	if err = tx.Create(reward).Error; err != nil {
+	credited, err := addInvitationRewardQuotaTx(tx, reward.InviterId, rewardQuota, false)
+	if err != nil {
 		return nil, err
 	}
-	if err = tx.Model(&User{}).
-		Where("id = ?", reward.InviterId).
-		Updates(map[string]interface{}{
-			"aff_quota":   gorm.Expr("aff_quota + ?", rewardQuota),
-			"aff_history": gorm.Expr("aff_history + ?", rewardQuota),
-		}).Error; err != nil {
+	if !credited {
+		return nil, nil
+	}
+	if err = tx.Create(reward).Error; err != nil {
 		return nil, err
 	}
 	if err = CreateInvitationRewardEventTx(tx, reward); err != nil {
@@ -141,11 +150,43 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 	return reward, nil
 }
 
+func addInvitationRewardQuotaTx(tx *gorm.DB, userId int, rewardQuota int, incrementInviteCount bool) (bool, error) {
+	if tx == nil {
+		return false, errors.New("transaction is required")
+	}
+	if userId <= 0 || rewardQuota < 0 || rewardQuota >= common.MaxQuota {
+		return false, ErrInvitationRewardQuotaLimitExceeded
+	}
+	updates := map[string]interface{}{}
+	query := tx.Model(&User{}).Where("id = ?", userId)
+	if rewardQuota > 0 {
+		maxCurrentQuota := common.MaxQuota - 1 - rewardQuota
+		query = query.Where("aff_quota <= ? AND aff_history <= ?", maxCurrentQuota, maxCurrentQuota)
+		updates["aff_quota"] = gorm.Expr("aff_quota + ?", rewardQuota)
+		updates["aff_history"] = gorm.Expr("aff_history + ?", rewardQuota)
+	}
+	if incrementInviteCount {
+		query = query.Where("aff_count < ?", common.MaxQuota)
+		updates["aff_count"] = gorm.Expr("aff_count + 1")
+	}
+	if len(updates) == 0 {
+		return false, nil
+	}
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return false, nil
+	}
+	return true, nil
+}
+
 func CreateInvitationRegisterRewardTx(tx *gorm.DB, inviterId int, inviteeId int) (*InvitationReward, error) {
 	if tx == nil {
 		return nil, errors.New("transaction is required")
 	}
-	if inviterId <= 0 || inviteeId <= 0 || common.QuotaForInviter <= 0 {
+	if inviterId <= 0 || inviteeId <= 0 {
 		return nil, nil
 	}
 
@@ -158,14 +199,33 @@ func CreateInvitationRegisterRewardTx(tx *gorm.DB, inviterId int, inviteeId int)
 		return nil, err
 	}
 
+	rewardQuota := 0
+	if operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInviter > 0 {
+		rewardQuota = common.QuotaForInviter
+	}
+	credited, err := addInvitationRewardQuotaTx(tx, inviterId, rewardQuota, true)
+	if err != nil {
+		return nil, err
+	}
+	if !credited && rewardQuota > 0 {
+		rewardQuota = 0
+		credited, err = addInvitationRewardQuotaTx(tx, inviterId, 0, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !credited {
+		return nil, nil
+	}
+
 	now := common.GetTimestamp()
 	reward := &InvitationReward{
 		InviterId:    inviterId,
 		InviteeId:    inviteeId,
 		RewardType:   InvitationRewardTypeRegister,
-		RewardQuota:  common.QuotaForInviter,
+		RewardQuota:  rewardQuota,
 		TriggerAt:    now,
-		RuleSnapshot: buildInvitationRewardRuleSnapshot(InvitationRewardTypeRegister, common.QuotaForInviter),
+		RuleSnapshot: buildInvitationRewardRuleSnapshot(InvitationRewardTypeRegister, rewardQuota),
 		Status:       InvitationRewardStatusSettled,
 		CreatedAt:    now,
 		SettledAt:    now,
@@ -173,8 +233,10 @@ func CreateInvitationRegisterRewardTx(tx *gorm.DB, inviterId int, inviteeId int)
 	if err = tx.Create(reward).Error; err != nil {
 		return nil, err
 	}
-	if err = CreateInvitationRewardEventTx(tx, reward); err != nil {
-		return nil, err
+	if reward.RewardQuota > 0 {
+		if err = CreateInvitationRewardEventTx(tx, reward); err != nil {
+			return nil, err
+		}
 	}
 	return reward, nil
 }
@@ -255,7 +317,7 @@ func GetUserInvitationRewardRecords(inviterId int, pageInfo *common.PageInfo) (
 		}
 	}()
 
-	err = tx.Model(&InvitationReward{}).Where("inviter_id = ?", inviterId).Count(&total).Error
+	err = tx.Model(&InvitationReward{}).Where("inviter_id = ? AND reward_quota > 0", inviterId).Count(&total).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -264,7 +326,7 @@ func GetUserInvitationRewardRecords(inviterId int, pageInfo *common.PageInfo) (
 	err = tx.Table("invitation_rewards").
 		Select("invitation_rewards.id, invitation_rewards.invitee_id, COALESCE(NULLIF(users.display_name, ''), users.username) AS invitee_name, invitation_rewards.reward_type, invitation_rewards.reward_quota, invitation_rewards.trigger_at, invitation_rewards.trigger_top_up_id, invitation_rewards.trigger_trade_no, invitation_rewards.remark, invitation_rewards.status, invitation_rewards.created_at, invitation_rewards.settled_at").
 		Joins("LEFT JOIN users ON users.id = invitation_rewards.invitee_id").
-		Where("invitation_rewards.inviter_id = ?", inviterId).
+		Where("invitation_rewards.inviter_id = ? AND invitation_rewards.reward_quota > 0", inviterId).
 		Order("invitation_rewards.id DESC").
 		Limit(pageInfo.GetPageSize()).
 		Offset(pageInfo.GetStartIdx()).

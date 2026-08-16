@@ -12,16 +12,22 @@ import (
 )
 
 type TopUp struct {
-	Id              int     `json:"id"`
-	UserId          int     `json:"user_id" gorm:"index"`
-	Amount          int64   `json:"amount"`
-	Money           float64 `json:"money"`
-	TradeNo         string  `json:"trade_no" gorm:"unique;type:varchar(255);index"`
-	PaymentMethod   string  `json:"payment_method" gorm:"type:varchar(50)"`
-	PaymentProvider string  `json:"payment_provider" gorm:"type:varchar(50);default:''"`
-	CreateTime      int64   `json:"create_time"`
-	CompleteTime    int64   `json:"complete_time"`
-	Status          string  `json:"status"`
+	Id                  int     `json:"id"`
+	UserId              int     `json:"user_id" gorm:"index"`
+	Amount              int64   `json:"amount"`
+	Money               float64 `json:"money"`
+	PaidAmountMinor     int64   `json:"paid_amount_minor"`
+	PaidCurrency        string  `json:"paid_currency" gorm:"type:varchar(3);index"`
+	PaidAmountVerified  bool    `json:"paid_amount_verified"`
+	RefundStatus        string  `json:"refund_status" gorm:"type:varchar(32);index"`
+	RefundedAmountMinor int64   `json:"refunded_amount_minor"`
+	RefundedAt          int64   `json:"refunded_at" gorm:"index"`
+	TradeNo             string  `json:"trade_no" gorm:"unique;type:varchar(255);index"`
+	PaymentMethod       string  `json:"payment_method" gorm:"type:varchar(50)"`
+	PaymentProvider     string  `json:"payment_provider" gorm:"type:varchar(50);default:''"`
+	CreateTime          int64   `json:"create_time"`
+	CompleteTime        int64   `json:"complete_time"`
+	Status              string  `json:"status"`
 }
 
 const (
@@ -173,9 +179,12 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 // 在同一个事务内完成，因此同一订单的并发/重复回调（包括多实例部署下）最多充值一次。
 // alreadyDone=true 表示订单此前已完成，本次为幂等重复回调。
 // 进程内的 LockOrder 只是优化，正确性由本函数的数据库行锁保证。
-func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (alreadyDone bool, err error) {
+func RechargeEpay(tradeNo string, actualPaymentMethod string, payment VerifiedPayment, callerIp string) (alreadyDone bool, err error) {
 	if tradeNo == "" {
 		return false, errors.New("未提供支付单号")
+	}
+	if _, err = NewVerifiedPaymentFromMinor(payment.AmountMinor, payment.Currency); err != nil {
+		return false, err
 	}
 
 	refCol := "`trade_no`"
@@ -195,6 +204,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 			return ErrPaymentMethodMismatch
 		}
 		if topUp.Status == common.TopUpStatusSuccess {
+			if err := topUp.verifyStoredPayment(payment); err != nil {
+				return err
+			}
 			alreadyDone = true
 			return nil
 		}
@@ -203,6 +215,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 		}
 		if actualPaymentMethod != "" && topUp.PaymentMethod != actualPaymentMethod {
 			topUp.PaymentMethod = actualPaymentMethod
+		}
+		if err := topUp.setVerifiedPayment(payment); err != nil {
+			return err
 		}
 		var quotaErr error
 		quotaToAdd, quotaErr = common.QuotaFromDecimalStrict(
@@ -244,14 +259,18 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 	return false, nil
 }
 
-func Recharge(referenceId string, customerId string, callerIp string) (err error) {
+func RechargeStripe(referenceId string, customerId string, payment VerifiedPayment, callerIp string) (err error) {
 	if referenceId == "" {
 		return errors.New("未提供支付单号")
+	}
+	if _, err = NewVerifiedPaymentFromMinor(payment.AmountMinor, payment.Currency); err != nil {
+		return err
 	}
 
 	var quota int
 	var rebate *InvitationRebate
 	var firstTopUpReward *InvitationReward
+	alreadyDone := false
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -269,8 +288,18 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 			return ErrPaymentMethodMismatch
 		}
 
+		if topUp.Status == common.TopUpStatusSuccess {
+			if err := topUp.verifyStoredPayment(payment); err != nil {
+				return err
+			}
+			alreadyDone = true
+			return nil
+		}
 		if topUp.Status != common.TopUpStatusPending {
 			return errors.New("充值订单状态错误")
+		}
+		if err := topUp.setVerifiedPayment(payment); err != nil {
+			return err
 		}
 
 		topUp.CompleteTime = common.GetTimestamp()
@@ -302,6 +331,9 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 	if err != nil {
 		common.SysError("topup failed: " + err.Error())
 		return errors.New("充值失败，请稍后重试")
+	}
+	if alreadyDone {
+		return nil
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quota, "stripe topup")
 
@@ -564,14 +596,18 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	RecordInvitationMilestoneRewardLog(firstTopUpReward)
 	return nil
 }
-func RechargeCreem(referenceId string, customerEmail string, customerName string, callerIp string) (err error) {
+func RechargeCreem(referenceId string, customerEmail string, customerName string, payment VerifiedPayment, callerIp string) (err error) {
 	if referenceId == "" {
 		return errors.New("未提供支付单号")
+	}
+	if _, err = NewVerifiedPaymentFromMinor(payment.AmountMinor, payment.Currency); err != nil {
+		return err
 	}
 
 	var quota int
 	var rebate *InvitationRebate
 	var firstTopUpReward *InvitationReward
+	alreadyDone := false
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -589,8 +625,18 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			return ErrPaymentMethodMismatch
 		}
 
+		if topUp.Status == common.TopUpStatusSuccess {
+			if err := topUp.verifyStoredPayment(payment); err != nil {
+				return err
+			}
+			alreadyDone = true
+			return nil
+		}
 		if topUp.Status != common.TopUpStatusPending {
 			return errors.New("充值订单状态错误")
+		}
+		if err := topUp.setVerifiedPayment(payment); err != nil {
+			return err
 		}
 
 		topUp.CompleteTime = common.GetTimestamp()
@@ -639,6 +685,9 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		common.SysError("creem topup failed: " + err.Error())
 		return errors.New("充值失败，请稍后重试")
 	}
+	if alreadyDone {
+		return nil
+	}
 	syncCreditUserQuotaCache(topUp.UserId, quota, "creem topup")
 
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
@@ -648,14 +697,18 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 	return nil
 }
 
-func RechargeWaffo(tradeNo string, callerIp string) (err error) {
+func RechargeWaffo(tradeNo string, payment VerifiedPayment, callerIp string) (err error) {
 	if tradeNo == "" {
 		return errors.New("未提供支付单号")
+	}
+	if _, err = NewVerifiedPaymentFromMinor(payment.AmountMinor, payment.Currency); err != nil {
+		return err
 	}
 
 	var quotaToAdd int
 	var rebate *InvitationRebate
 	var firstTopUpReward *InvitationReward
+	alreadyDone := false
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -674,11 +727,18 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 		}
 
 		if topUp.Status == common.TopUpStatusSuccess {
+			if err := topUp.verifyStoredPayment(payment); err != nil {
+				return err
+			}
+			alreadyDone = true
 			return nil // 幂等：已成功直接返回
 		}
 
 		if topUp.Status != common.TopUpStatusPending {
 			return errors.New("充值订单状态错误")
+		}
+		if err := topUp.setVerifiedPayment(payment); err != nil {
+			return err
 		}
 
 		quotaToAdd, err = common.QuotaFromDecimalStrict(
@@ -709,6 +769,9 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 		common.SysError("waffo topup failed: " + err.Error())
 		return errors.New("充值失败，请稍后重试")
 	}
+	if alreadyDone {
+		return nil
+	}
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "waffo topup")
 
 	if quotaToAdd > 0 {
@@ -720,14 +783,18 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 	return nil
 }
 
-func RechargeWaffoPancake(tradeNo string) (err error) {
+func RechargeWaffoPancake(tradeNo string, payment VerifiedPayment) (err error) {
 	if tradeNo == "" {
 		return errors.New("未提供支付单号")
+	}
+	if _, err = NewVerifiedPaymentFromMinor(payment.AmountMinor, payment.Currency); err != nil {
+		return err
 	}
 
 	var quotaToAdd int
 	var rebate *InvitationRebate
 	var firstTopUpReward *InvitationReward
+	alreadyDone := false
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -746,11 +813,18 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 		}
 
 		if topUp.Status == common.TopUpStatusSuccess {
+			if err := topUp.verifyStoredPayment(payment); err != nil {
+				return err
+			}
+			alreadyDone = true
 			return nil
 		}
 
 		if topUp.Status != common.TopUpStatusPending {
 			return errors.New("充值订单状态错误")
+		}
+		if err := topUp.setVerifiedPayment(payment); err != nil {
+			return err
 		}
 
 		quotaToAdd, err = common.QuotaFromDecimalStrict(
@@ -780,6 +854,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 	if err != nil {
 		common.SysError("waffo pancake topup failed: " + err.Error())
 		return errors.New("充值失败，请稍后重试")
+	}
+	if alreadyDone {
+		return nil
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "waffo pancake topup")
 

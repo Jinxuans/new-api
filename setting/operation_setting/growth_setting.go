@@ -54,6 +54,10 @@ func GetGrowthSetting() *GrowthSetting {
 	return &growthSetting
 }
 
+func GetInviteRebatePercentage() float64 {
+	return growthSetting.InviteRebatePercentage
+}
+
 func IsDailyCheckinEnabled() bool {
 	return growthSetting.DailyCheckinEnabled
 }

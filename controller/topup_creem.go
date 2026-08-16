@@ -6,16 +6,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"time"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
-	"io"
-	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -77,7 +77,7 @@ func (*CreemAdaptor) RequestPay(c *gin.Context, req *CreemPayRequest) {
 
 	// 解析产品列表
 	var products []CreemProduct
-	err := json.Unmarshal([]byte(setting.CreemProducts), &products)
+	err := common.Unmarshal([]byte(setting.CreemProducts), &products)
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 产品配置解析失败 user_id=%d error=%q", c.GetInt("id"), err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "产品配置错误"})
@@ -330,12 +330,31 @@ func handleCreemRefund(c *gin.Context, event *CreemWebhookEvent) {
 		c.Status(http.StatusOK)
 		return
 	}
-	if event.Object.RefundAmount > 0 && event.Object.Transaction.AmountPaid > 0 && event.Object.RefundAmount < event.Object.Transaction.AmountPaid {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 部分退款需人工核对推广返佣 trade_no=%s refund_trade_no=%s refund_amount=%d amount_paid=%d", referenceId, refundTradeNo, event.Object.RefundAmount, event.Object.Transaction.AmountPaid))
-		c.Status(http.StatusOK)
+	paidAmount := event.Object.Transaction.AmountPaid
+	if paidAmount <= 0 {
+		paidAmount = event.Object.Order.AmountPaid
+	}
+	refundedAmount := event.Object.RefundAmount
+	if refundedAmount <= 0 {
+		refundedAmount = event.Object.Transaction.RefundedAmount
+	}
+	kind := model.PromotionRefundKindFull
+	if refundedAmount > 0 && paidAmount > 0 && refundedAmount < paidAmount {
+		kind = model.PromotionRefundKindPartial
+	}
+	if err := handlePromotionRefundFromWebhook(c.Request.Context(), model.PromotionRefundInput{
+		Provider:            model.PaymentProviderCreem,
+		TradeNo:             referenceId,
+		RefundTradeNo:       refundTradeNo,
+		Kind:                kind,
+		PaidAmountMinor:     int64(paidAmount),
+		RefundedAmountMinor: int64(refundedAmount),
+		Currency:            firstNonEmptyString(event.Object.Transaction.Currency, event.Object.Order.Currency),
+		Remark:              "creem refund",
+	}); err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
-	reverseInvitationRebateByTradeNoFromWebhook(c.Request.Context(), model.PaymentProviderCreem, referenceId, refundTradeNo, "creem refund")
 	c.Status(http.StatusOK)
 }
 
@@ -354,7 +373,23 @@ func handleCreemDispute(c *gin.Context, event *CreemWebhookEvent) {
 		c.Status(http.StatusOK)
 		return
 	}
-	reverseInvitationRebateByTradeNoFromWebhook(c.Request.Context(), model.PaymentProviderCreem, referenceId, disputeTradeNo, "creem dispute")
+	paidAmount := event.Object.Transaction.AmountPaid
+	if paidAmount <= 0 {
+		paidAmount = event.Object.Order.AmountPaid
+	}
+	if err := handlePromotionRefundFromWebhook(c.Request.Context(), model.PromotionRefundInput{
+		Provider:            model.PaymentProviderCreem,
+		TradeNo:             referenceId,
+		RefundTradeNo:       disputeTradeNo,
+		Kind:                model.PromotionRefundKindDispute,
+		PaidAmountMinor:     int64(paidAmount),
+		RefundedAmountMinor: int64(paidAmount),
+		Currency:            firstNonEmptyString(event.Object.Transaction.Currency, event.Object.Order.Currency),
+		Remark:              "creem dispute",
+	}); err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
 	c.Status(http.StatusOK)
 }
 
@@ -405,7 +440,7 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		return
 	}
 
-	if topUp.Status != common.TopUpStatusPending {
+	if topUp.Status != common.TopUpStatusPending && topUp.Status != common.TopUpStatusSuccess {
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("Creem 充值订单状态非 pending，忽略处理 trade_no=%s status=%s creem_order_id=%s", referenceId, topUp.Status, event.Object.Order.Id))
 		c.Status(http.StatusOK) // 已处理过的订单，返回成功避免重复处理
 		return
@@ -423,7 +458,13 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 回调客户姓名为空 trade_no=%s creem_order_id=%s", referenceId, event.Object.Order.Id))
 	}
 
-	err := model.RechargeCreem(referenceId, customerEmail, customerName, c.ClientIP())
+	payment, err := model.NewVerifiedPaymentFromMinor(int64(event.Object.Order.AmountPaid), event.Object.Order.Currency)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 回调支付快照无效 trade_no=%s amount_paid=%d currency=%q error=%q", referenceId, event.Object.Order.AmountPaid, event.Object.Order.Currency, err.Error()))
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	err = model.RechargeCreem(referenceId, customerEmail, customerName, payment, c.ClientIP())
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 充值处理失败 trade_no=%s creem_order_id=%s client_ip=%s error=%q", referenceId, event.Object.Order.Id, c.ClientIP(), err.Error()))
 		c.AbortWithStatus(http.StatusInternalServerError)
@@ -478,7 +519,7 @@ func genCreemLink(ctx context.Context, referenceId string, product *CreemProduct
 	}
 
 	// 序列化请求数据
-	jsonData, err := json.Marshal(requestData)
+	jsonData, err := common.Marshal(requestData)
 	if err != nil {
 		return "", fmt.Errorf("序列化请求数据失败: %v", err)
 	}
@@ -519,7 +560,7 @@ func genCreemLink(ctx context.Context, referenceId string, product *CreemProduct
 	}
 	// 解析响应
 	var checkoutResp CreemCheckoutResponse
-	err = json.Unmarshal(body, &checkoutResp)
+	err = common.Unmarshal(body, &checkoutResp)
 	if err != nil {
 		return "", fmt.Errorf("解析响应失败: %v", err)
 	}

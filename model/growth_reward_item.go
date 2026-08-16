@@ -145,6 +145,18 @@ func GetDefaultGrowthRewardItems() []*GrowthRewardItem {
 	}
 }
 
+func EnsureDefaultGrowthRewardItems() error {
+	for _, item := range GetDefaultGrowthRewardItems() {
+		row := *item
+		if err := DB.Where("code = ?", item.Code).FirstOrCreate(&row).Error; err != nil {
+			return err
+		}
+	}
+	return DB.Model(&GrowthRewardItem{}).
+		Where("code = ? AND item_type <> ?", GrowthRewardItemJoinCommunity, GrowthRewardItemTypeAuto).
+		Update("item_type", GrowthRewardItemTypeAuto).Error
+}
+
 func migrateGrowthRewardTables() error {
 	migrator := DB.Migrator()
 	if migrator.HasTable("growth_tasks") && !migrator.HasTable(&GrowthRewardItem{}) {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -392,21 +393,66 @@ func UpdateOption(c *gin.Context) {
 func validateGrowthSettingOption(key string, value string) error {
 	growthSetting := operation_setting.GetGrowthSetting()
 	switch key {
+	case "growth_setting.enabled", "growth_setting.daily_checkin_enabled", "growth_setting.submission_enabled":
+		if _, err := strconv.ParseBool(value); err != nil {
+			return fmt.Errorf("奖励开关必须是布尔值")
+		}
+	case "InviteRebatePercentage", "growth_setting.invite_rebate_percentage":
+		percentage, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(percentage) || math.IsInf(percentage, 0) || percentage < 0 || percentage > 100 {
+			return fmt.Errorf("邀请返佣比例必须是 0 到 100 之间的有限数字")
+		}
+	case "QuotaForInviter", "QuotaForInvitee",
+		"growth_setting.first_api_key_reward_quota",
+		"growth_setting.first_api_request_reward_quota",
+		"growth_setting.first_topup_reward_quota",
+		"growth_setting.three_day_usage_reward_quota",
+		"growth_setting.monthly_spend_reward_quota",
+		"growth_setting.monthly_spend_target_quota",
+		"growth_setting.invite_first_request_reward_quota",
+		"growth_setting.invite_first_topup_reward_quota",
+		"growth_setting.user_daily_reward_limit_quota",
+		"growth_setting.site_daily_budget_quota":
+		quota, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || quota < 0 {
+			return fmt.Errorf("奖励额度必须是 0 到 %d 之间的整数", int64(math.MaxInt32))
+		}
+	case "growth_setting.rebate_freeze_days":
+		days, err := strconv.Atoi(value)
+		if err != nil || days < 0 || days > 3650 {
+			return fmt.Errorf("返佣冻结天数必须是 0 到 3650 之间的整数")
+		}
 	case "growth_setting.daily_checkin_min_reward_quota":
-		minQuota, err := strconv.Atoi(value)
+		minQuota, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || minQuota < 0 {
 			return fmt.Errorf("签到最小奖励额度必须是非负整数")
 		}
-		if growthSetting.DailyCheckinMaxRewardQuota >= 0 && minQuota > growthSetting.DailyCheckinMaxRewardQuota {
+		if growthSetting.DailyCheckinMaxRewardQuota >= 0 && minQuota > int64(growthSetting.DailyCheckinMaxRewardQuota) {
 			return fmt.Errorf("签到最小奖励额度不能大于最大奖励额度")
 		}
 	case "growth_setting.daily_checkin_max_reward_quota":
-		maxQuota, err := strconv.Atoi(value)
+		maxQuota, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || maxQuota < 0 {
 			return fmt.Errorf("签到最大奖励额度必须是非负整数")
 		}
-		if maxQuota < growthSetting.DailyCheckinMinRewardQuota {
+		if maxQuota < int64(growthSetting.DailyCheckinMinRewardQuota) {
 			return fmt.Errorf("签到最大奖励额度不能小于最小奖励额度")
+		}
+	case "growth_setting.submission_min_reward_quota":
+		minQuota, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || minQuota < 0 {
+			return fmt.Errorf("投稿最小奖励额度必须是非负整数")
+		}
+		if minQuota > int64(growthSetting.SubmissionMaxRewardQuota) {
+			return fmt.Errorf("投稿最小奖励额度不能大于最大奖励额度")
+		}
+	case "growth_setting.submission_max_reward_quota":
+		maxQuota, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || maxQuota < 0 {
+			return fmt.Errorf("投稿最大奖励额度必须是非负整数")
+		}
+		if maxQuota < int64(growthSetting.SubmissionMinRewardQuota) {
+			return fmt.Errorf("投稿最大奖励额度不能小于最小奖励额度")
 		}
 	}
 	return nil

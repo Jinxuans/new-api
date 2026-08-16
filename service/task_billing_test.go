@@ -53,8 +53,10 @@ func TestMain(m *testing.M) {
 		&model.PromotionCommissionLedger{},
 		&model.PromotionWithdrawal{},
 		&model.PromotionWithdrawalItem{},
+		&model.PromotionRefundCase{},
 		&model.GrowthRewardItem{},
 		&model.GrowthReward{},
+		&model.GrowthRewardBudget{},
 		&model.GrowthSubmission{},
 		&model.Checkin{},
 		&model.SubscriptionOrder{},
@@ -63,6 +65,9 @@ func TestMain(m *testing.M) {
 		&model.SystemTaskLock{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
+	}
+	if err := model.EnsureDefaultGrowthRewardItems(); err != nil {
+		panic("failed to seed growth reward items: " + err.Error())
 	}
 
 	os.Exit(m.Run())
@@ -88,8 +93,10 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM promotion_commission_ledgers")
 		model.DB.Exec("DELETE FROM promotion_withdrawals")
 		model.DB.Exec("DELETE FROM promotion_withdrawal_items")
+		model.DB.Exec("DELETE FROM promotion_refund_cases")
 		model.DB.Exec("DELETE FROM growth_reward_items")
 		model.DB.Exec("DELETE FROM growth_rewards")
+		model.DB.Exec("DELETE FROM growth_reward_budgets")
 		model.DB.Exec("DELETE FROM growth_submissions")
 		model.DB.Exec("DELETE FROM checkins")
 		model.DB.Exec("DELETE FROM subscription_orders")

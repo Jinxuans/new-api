@@ -55,12 +55,14 @@ func TestMain(m *testing.M) {
 		&PromotionCommissionLedger{},
 		&PromotionWithdrawal{},
 		&PromotionWithdrawalItem{},
+		&PromotionRefundCase{},
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
 		&GrowthRewardItem{},
 		&GrowthReward{},
+		&GrowthRewardBudget{},
 		&GrowthSubmission{},
 		&Checkin{},
 		&UserOAuthBinding{},
@@ -99,12 +101,14 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM promotion_commission_ledgers")
 		DB.Exec("DELETE FROM promotion_withdrawals")
 		DB.Exec("DELETE FROM promotion_withdrawal_items")
+		DB.Exec("DELETE FROM promotion_refund_cases")
 		DB.Exec("DELETE FROM subscription_orders")
 		DB.Exec("DELETE FROM subscription_plans")
 		DB.Exec("DELETE FROM user_subscriptions")
 		DB.Exec("DELETE FROM subscription_pre_consume_records")
 		DB.Exec("DELETE FROM growth_reward_items")
 		DB.Exec("DELETE FROM growth_rewards")
+		DB.Exec("DELETE FROM growth_reward_budgets")
 		DB.Exec("DELETE FROM growth_submissions")
 		DB.Exec("DELETE FROM checkins")
 		DB.Exec("DELETE FROM user_oauth_bindings")

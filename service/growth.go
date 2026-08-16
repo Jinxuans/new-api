@@ -14,16 +14,22 @@ import (
 )
 
 type GrowthSummary struct {
-	AvailableRewardQuota       int64                      `json:"available_reward_quota"`
-	PendingRewardQuota         int64                      `json:"pending_reward_quota"`
-	TotalRewardQuota           int64                      `json:"total_reward_quota"`
-	InviteCount                int                        `json:"invite_count"`
-	MonthlyRebateQuota         int64                      `json:"monthly_rebate_quota"`
-	TotalRebateQuota           int                        `json:"total_rebate_quota"`
-	AffCode                    string                     `json:"aff_code"`
-	InviteRebatePercent        float64                    `json:"invite_rebate_percent"`
-	InvitationChainRewardQuota int                        `json:"invitation_chain_reward_quota"`
-	CashCommission             PromotionCommissionSummary `json:"cash_commission"`
+	// Legacy aggregate fields retained for API compatibility. They mix task
+	// rewards and referral credits; new clients should use the split fields.
+	AvailableRewardQuota         int64                      `json:"available_reward_quota"`
+	PendingRewardQuota           int64                      `json:"pending_reward_quota"`
+	TotalRewardQuota             int64                      `json:"total_reward_quota"`
+	TaskRewardEarnedQuota        int64                      `json:"task_reward_earned_quota"`
+	TaskRewardPendingQuota       int64                      `json:"task_reward_pending_quota"`
+	ReferralCreditAvailableQuota int64                      `json:"referral_credit_available_quota"`
+	ReferralCreditTotalQuota     int64                      `json:"referral_credit_total_quota"`
+	InviteCount                  int                        `json:"invite_count"`
+	MonthlyRebateQuota           int64                      `json:"monthly_rebate_quota"`
+	TotalRebateQuota             int                        `json:"total_rebate_quota"`
+	AffCode                      string                     `json:"aff_code"`
+	InviteRebatePercent          float64                    `json:"invite_rebate_percent"`
+	InvitationChainRewardQuota   int                        `json:"invitation_chain_reward_quota"`
+	CashCommission               PromotionCommissionSummary `json:"cash_commission"`
 }
 
 type PromotionCommissionSummary struct {
@@ -73,25 +79,7 @@ type GrowthReviewRequest struct {
 	ReviewNote  string `json:"review_note"`
 }
 
-func EnsureDefaultGrowthRewardItems() error {
-	for _, item := range model.GetDefaultGrowthRewardItems() {
-		row := *item
-		if err := model.DB.Where("code = ?", item.Code).FirstOrCreate(&row).Error; err != nil {
-			return err
-		}
-	}
-	if err := model.DB.Model(&model.GrowthRewardItem{}).
-		Where("code = ? AND item_type <> ?", model.GrowthRewardItemJoinCommunity, model.GrowthRewardItemTypeAuto).
-		Update("item_type", model.GrowthRewardItemTypeAuto).Error; err != nil {
-		return err
-	}
-	return nil
-}
-
 func GetGrowthSummary(userId int) (*GrowthSummary, error) {
-	if err := model.SyncInvitationRebatesForInviter(userId); err != nil {
-		return nil, err
-	}
 	user, err := model.GetUserById(userId, true)
 	if err != nil {
 		return nil, err
@@ -130,16 +118,20 @@ func GetGrowthSummary(userId int) (*GrowthSummary, error) {
 	}
 
 	return &GrowthSummary{
-		AvailableRewardQuota:       rewardSummary.AvailableRewardQuota,
-		PendingRewardQuota:         rewardSummary.PendingRewardQuota + pendingInvitationRebate,
-		TotalRewardQuota:           rewardSummary.TotalRewardQuota,
-		InviteCount:                user.AffCount,
-		MonthlyRebateQuota:         monthlyRebate + monthlyInvitationReward,
-		TotalRebateQuota:           user.AffHistoryQuota,
-		AffCode:                    user.AffCode,
-		InviteRebatePercent:        common.InviteRebatePercentage,
-		InvitationChainRewardQuota: invitationChainRewardQuota(),
-		CashCommission:             *cashSummary,
+		AvailableRewardQuota:         rewardSummary.AvailableRewardQuota,
+		PendingRewardQuota:           rewardSummary.PendingRewardQuota + pendingInvitationRebate,
+		TotalRewardQuota:             rewardSummary.TotalRewardQuota,
+		TaskRewardEarnedQuota:        rewardSummary.TaskRewardEarnedQuota,
+		TaskRewardPendingQuota:       rewardSummary.TaskRewardPendingQuota,
+		ReferralCreditAvailableQuota: rewardSummary.ReferralCreditAvailableQuota,
+		ReferralCreditTotalQuota:     rewardSummary.ReferralCreditTotalQuota,
+		InviteCount:                  user.AffCount,
+		MonthlyRebateQuota:           monthlyRebate + monthlyInvitationReward,
+		TotalRebateQuota:             user.AffHistoryQuota,
+		AffCode:                      user.AffCode,
+		InviteRebatePercent:          operation_setting.GetInviteRebatePercentage(),
+		InvitationChainRewardQuota:   invitationChainRewardQuota(),
+		CashCommission:               *cashSummary,
 	}, nil
 }
 
@@ -165,7 +157,7 @@ func GetPromotionCommissionSummary(userId int) (*PromotionCommissionSummary, err
 	var rows []statusAmountRow
 	if err := model.DB.Model(&model.PromotionCommissionLedger{}).
 		Select("status, COALESCE(SUM(net_amount_cents), 0) AS amount, COALESCE(SUM(quota_equivalent), 0) AS quota").
-		Where("user_id = ? AND cashable = ?", userId, true).
+		Where("user_id = ? AND cashable = ? AND currency = ?", userId, true, "CNY").
 		Group("status").
 		Scan(&rows).Error; err != nil {
 		return nil, err
@@ -192,31 +184,33 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 	if userId <= 0 {
 		return 0, errors.New("invalid user")
 	}
+	if err := model.SettleDueInvitationRebatesForInviter(userId); err != nil {
+		return 0, err
+	}
 	var transferredQuota int
 	var transferredAmountCents int64
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
-		var ledgers []*model.PromotionCommissionLedger
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
-			Where("user_id = ? AND status = ? AND cashable = ?", userId, model.PromotionCommissionStatusSettled, true).
-			Order("id ASC").
-			Find(&ledgers).Error; err != nil {
+		ledgers, err := model.LockSettledPromotionCommissionLedgersTx(tx, userId)
+		if err != nil {
 			return err
 		}
 		if len(ledgers) == 0 {
 			return errors.New("no settled cash commission available")
 		}
 		ledgerIds := make([]int, 0, len(ledgers))
+		var transferredQuotaTotal int64
 		for _, ledger := range ledgers {
+			var err error
+			transferredAmountCents, transferredQuotaTotal, err = addPromotionCommissionLedgerTotals(transferredAmountCents, transferredQuotaTotal, ledger)
+			if err != nil {
+				return err
+			}
 			ledgerIds = append(ledgerIds, ledger.Id)
-			transferredQuota += ledger.QuotaEquivalent
-			transferredAmountCents += ledger.NetAmountCents
 		}
-		if transferredQuota <= 0 {
-			return errors.New("no quota equivalent available")
-		}
+		transferredQuota = int(transferredQuotaTotal)
 		now := common.GetTimestamp()
 		res := tx.Model(&model.PromotionCommissionLedger{}).
-			Where("id IN ? AND user_id = ? AND status = ? AND cashable = ?", ledgerIds, userId, model.PromotionCommissionStatusSettled, true).
+			Where("id IN ? AND user_id = ? AND status = ? AND cashable = ? AND currency = ?", ledgerIds, userId, model.PromotionCommissionStatusSettled, true, "CNY").
 			Updates(map[string]interface{}{
 				"status":         model.PromotionCommissionStatusTransferred,
 				"transferred_at": now,
@@ -227,10 +221,15 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 		if res.RowsAffected != int64(len(ledgerIds)) {
 			return errors.New("commission status changed, please retry")
 		}
-		if err := tx.Model(&model.User{}).
-			Where("id = ?", userId).
-			Update("quota", gorm.Expr("quota + ?", transferredQuota)).Error; err != nil {
-			return err
+		maxCurrentQuota := common.MaxQuota - 1 - transferredQuota
+		walletUpdate := tx.Model(&model.User{}).
+			Where("id = ? AND quota <= ?", userId, maxCurrentQuota).
+			Update("quota", gorm.Expr("quota + ?", transferredQuota))
+		if walletUpdate.Error != nil {
+			return walletUpdate.Error
+		}
+		if walletUpdate.RowsAffected != 1 {
+			return model.ErrTopUpQuotaLimitExceeded
 		}
 		return model.CreatePromotionEventTx(tx, &model.PromotionEvent{
 			EventKey:        fmt.Sprintf("%s:%s:%d:%d", model.PromotionEventTypeCommissionTransferred, model.PromotionEventSourceCommissionTransfer, userId, now),
@@ -250,6 +249,9 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := model.InvalidateUserCache(userId); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user cache after commission transfer: user_id=%d error=%v", userId, err))
+	}
 	model.RecordLog(userId, model.LogTypeSystem, fmt.Sprintf("Promotion cash commission transferred to balance: %s", logger.LogQuota(transferredQuota)))
 	return transferredQuota, nil
 }
@@ -258,16 +260,18 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 	if userId <= 0 {
 		return nil, errors.New("invalid user")
 	}
-	if strings.TrimSpace(req.PayoutMethod) == "" || strings.TrimSpace(req.PayoutAccount) == "" {
-		return nil, errors.New("payout method and account are required")
+	var err error
+	req, err = normalizePromotionWithdrawalRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := model.SettleDueInvitationRebatesForInviter(userId); err != nil {
+		return nil, err
 	}
 	var withdrawal *model.PromotionWithdrawal
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
-		var ledgers []*model.PromotionCommissionLedger
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
-			Where("user_id = ? AND status = ? AND cashable = ?", userId, model.PromotionCommissionStatusSettled, true).
-			Order("id ASC").
-			Find(&ledgers).Error; err != nil {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		ledgers, err := model.LockSettledPromotionCommissionLedgersTx(tx, userId)
+		if err != nil {
 			return err
 		}
 		if len(ledgers) == 0 {
@@ -276,19 +280,20 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 
 		ledgerIds := make([]int, 0, len(ledgers))
 		var grossAmountCents int64
-		var quotaEquivalent int
+		var quotaEquivalentTotal int64
 		for _, ledger := range ledgers {
+			var err error
+			grossAmountCents, quotaEquivalentTotal, err = addPromotionCommissionLedgerTotals(grossAmountCents, quotaEquivalentTotal, ledger)
+			if err != nil {
+				return err
+			}
 			ledgerIds = append(ledgerIds, ledger.Id)
-			grossAmountCents += ledger.NetAmountCents
-			quotaEquivalent += ledger.QuotaEquivalent
 		}
-		if grossAmountCents <= 0 {
-			return errors.New("no withdrawable cash commission available")
-		}
+		quotaEquivalent := int(quotaEquivalentTotal)
 		accountSnapshot, err := common.Marshal(map[string]interface{}{
-			"payout_method":  strings.TrimSpace(req.PayoutMethod),
-			"payout_account": strings.TrimSpace(req.PayoutAccount),
-			"remark":         strings.TrimSpace(req.Remark),
+			"payout_method":  req.PayoutMethod,
+			"payout_account": req.PayoutAccount,
+			"remark":         req.Remark,
 		})
 		if err != nil {
 			return err
@@ -299,7 +304,7 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 			GrossAmountCents:      grossAmountCents,
 			NetAmountCents:        grossAmountCents,
 			Status:                model.PromotionWithdrawalStatusPendingReview,
-			PayoutMethod:          strings.TrimSpace(req.PayoutMethod),
+			PayoutMethod:          req.PayoutMethod,
 			PayoutAccountSnapshot: string(accountSnapshot),
 		}
 		if err := tx.Create(nextWithdrawal).Error; err != nil {
@@ -317,7 +322,7 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 			return err
 		}
 		res := tx.Model(&model.PromotionCommissionLedger{}).
-			Where("id IN ? AND user_id = ? AND status = ? AND cashable = ?", ledgerIds, userId, model.PromotionCommissionStatusSettled, true).
+			Where("id IN ? AND user_id = ? AND status = ? AND cashable = ? AND currency = ?", ledgerIds, userId, model.PromotionCommissionStatusSettled, true, "CNY").
 			Updates(map[string]interface{}{
 				"status": model.PromotionCommissionStatusWithdrawing,
 				"remark": fmt.Sprintf("withdrawal #%d, quota_equivalent=%d", nextWithdrawal.Id, quotaEquivalent),
@@ -339,7 +344,7 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 			Currency:        nextWithdrawal.Currency,
 			Status:          nextWithdrawal.Status,
 			Title:           "Cash withdrawal request submitted",
-			Remark:          strings.TrimSpace(req.Remark),
+			Remark:          req.Remark,
 			CreatedAt:       nextWithdrawal.AppliedAt,
 		}); err != nil {
 			return err
@@ -366,10 +371,6 @@ func GetCheckinStats(userId int, month string) (map[string]interface{}, error) {
 	return model.GetUserCheckinStats(userId, month)
 }
 
-func AdminListPromotionWithdrawals(pageInfo *common.PageInfo) ([]*model.PromotionWithdrawal, int64, error) {
-	return model.AdminListPromotionWithdrawals(pageInfo)
-}
-
 func AdminApprovePromotionWithdrawal(id int, reviewerId int, req PromotionWithdrawalReviewRequest) (*model.PromotionWithdrawal, error) {
 	var withdrawal *model.PromotionWithdrawal
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
@@ -377,6 +378,9 @@ func AdminApprovePromotionWithdrawal(id int, reviewerId int, req PromotionWithdr
 			model.PromotionWithdrawalStatusPendingReview,
 		})
 		if err != nil {
+			return err
+		}
+		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
 			return err
 		}
 		withdrawal = updatedWithdrawal
@@ -437,6 +441,9 @@ func AdminMarkPromotionWithdrawalPaid(id int, reviewerId int, req PromotionWithd
 		if err != nil {
 			return err
 		}
+		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
+			return err
+		}
 		withdrawal = updatedWithdrawal
 		if err := releasePromotionWithdrawalLedgersTx(tx, withdrawal.Id, model.PromotionCommissionStatusWithdrawn); err != nil {
 			return err
@@ -462,10 +469,6 @@ func AdminMarkPromotionWithdrawalPaid(id int, reviewerId int, req PromotionWithd
 		})
 	})
 	return withdrawal, err
-}
-
-func updatePromotionWithdrawalReview(id int, reviewerId int, status string, tradeNo string, note string, allowedStatuses []string) (*model.PromotionWithdrawal, error) {
-	return updatePromotionWithdrawalReviewTx(model.DB, id, reviewerId, status, tradeNo, note, allowedStatuses)
 }
 
 func updatePromotionWithdrawalReviewTx(tx *gorm.DB, id int, reviewerId int, status string, tradeNo string, note string, allowedStatuses []string) (*model.PromotionWithdrawal, error) {
@@ -512,15 +515,26 @@ func releasePromotionWithdrawalLedgersTx(tx *gorm.DB, withdrawalId int, targetSt
 	if targetStatus == model.PromotionCommissionStatusWithdrawn {
 		updates["withdrawn_at"] = common.GetTimestamp()
 	}
-	return tx.Model(&model.PromotionCommissionLedger{}).
+	var itemCount int64
+	if err := tx.Model(&model.PromotionWithdrawalItem{}).Where("withdrawal_id = ?", withdrawalId).Count(&itemCount).Error; err != nil {
+		return err
+	}
+	if itemCount == 0 {
+		return model.ErrPromotionWithdrawalLedgerNotPayable
+	}
+	result := tx.Model(&model.PromotionCommissionLedger{}).
 		Where("status = ? AND id IN (?)", sourceStatus, tx.Model(&model.PromotionWithdrawalItem{}).Select("ledger_id").Where("withdrawal_id = ?", withdrawalId)).
-		Updates(updates).Error
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != itemCount {
+		return model.ErrPromotionWithdrawalLedgerNotPayable
+	}
+	return nil
 }
 
 func ListGrowthRewardItemsForUser(userId int) ([]*GrowthRewardItemStatus, error) {
-	if err := EnsureDefaultGrowthRewardItems(); err != nil {
-		return nil, err
-	}
 	growthSetting := operation_setting.GetGrowthSetting()
 	var rewardItems []*model.GrowthRewardItem
 	if err := model.DB.Order("id ASC").Find(&rewardItems).Error; err != nil {
@@ -644,6 +658,7 @@ func ClaimGrowthRewardItem(userId int, code string, password string) (*model.Gro
 			return err
 		}
 		reward = model.NewSettledGrowthReward(userId, item.Code, rewardQuota, 0, "")
+		reward.ClaimKey = growthRewardClaimKey(userId, item, 0)
 		return model.CreateSettledGrowthRewardTx(tx, reward)
 	})
 	if err != nil {
@@ -659,15 +674,17 @@ func ListGrowthRewards(userId int, pageInfo *common.PageInfo) ([]*model.GrowthRe
 }
 
 func ListPromotionEvents(userId int, pageInfo *common.PageInfo) ([]*model.PromotionEvent, int64, error) {
-	if err := model.BackfillPromotionEventsForUser(userId); err != nil {
-		return nil, 0, err
-	}
 	return model.ListPromotionEvents(userId, pageInfo)
 }
 
 func CreateGrowthSubmission(userId int, req GrowthSubmissionRequest) (*model.GrowthSubmission, error) {
 	if !operation_setting.GetGrowthSetting().SubmissionEnabled {
 		return nil, errors.New("growth submissions are not enabled")
+	}
+	var err error
+	req, err = normalizeGrowthSubmissionRequest(req)
+	if err != nil {
+		return nil, err
 	}
 	itemCode := req.ItemCode
 	if itemCode == "" {
@@ -686,18 +703,6 @@ func CreateGrowthSubmission(userId int, req GrowthSubmissionRequest) (*model.Gro
 	if item.ItemType == model.GrowthRewardItemTypeAuto {
 		return nil, errors.New("this reward item does not accept submissions")
 	}
-	if item.DailyLimit > 0 {
-		var count int64
-		if err := model.DB.Model(&model.GrowthSubmission{}).
-			Where("user_id = ? AND item_code = ? AND created_at >= ? AND status <> ?", userId, item.Code, startOfToday(), model.GrowthSubmissionStatusRejected).
-			Count(&count).Error; err != nil {
-			return nil, err
-		}
-		if count >= int64(item.DailyLimit) {
-			return nil, errors.New("daily submission limit reached")
-		}
-	}
-
 	submission := &model.GrowthSubmission{
 		UserId:   userId,
 		ItemCode: item.Code,
@@ -706,7 +711,26 @@ func CreateGrowthSubmission(userId int, req GrowthSubmissionRequest) (*model.Gro
 		Remark:   req.Remark,
 		Status:   model.GrowthSubmissionStatusPending,
 	}
-	if err := model.DB.Create(submission).Error; err != nil {
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if item.DailyLimit > 0 {
+			if err := lockUserForRewardTx(tx, userId); err != nil {
+				return err
+			}
+			var count int64
+			if err := tx.Model(&model.GrowthSubmission{}).
+				Where("user_id = ? AND item_code = ? AND created_at >= ? AND status <> ?", userId, item.Code, startOfToday(), model.GrowthSubmissionStatusRejected).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count >= int64(item.DailyLimit) {
+				return errors.New("daily submission limit reached")
+			}
+		}
+		if err := tx.Create(submission).Error; err != nil {
+			return err
+		}
+		return model.CreateGrowthSubmissionEventTx(tx, submission, model.PromotionEventTypeGrowthSubmissionCreated)
+	}); err != nil {
 		return nil, err
 	}
 	return submission, nil
@@ -724,16 +748,6 @@ func AdminListGrowthRewards(pageInfo *common.PageInfo) ([]*model.GrowthReward, i
 	var rewards []*model.GrowthReward
 	err := model.DB.Order("id DESC").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Find(&rewards).Error
 	return rewards, total, err
-}
-
-func AdminListGrowthSubmissions(pageInfo *common.PageInfo) ([]*model.GrowthSubmission, int64, error) {
-	var total int64
-	if err := model.DB.Model(&model.GrowthSubmission{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var submissions []*model.GrowthSubmission
-	err := model.DB.Order("id DESC").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Find(&submissions).Error
-	return submissions, total, err
 }
 
 func ApproveGrowthSubmission(id int, reviewerId int, req GrowthReviewRequest) (*model.GrowthSubmission, error) {
@@ -755,8 +769,11 @@ func ApproveGrowthSubmission(id int, reviewerId int, req GrowthReviewRequest) (*
 	if rewardQuota <= 0 {
 		rewardQuota = operation_setting.GetGrowthSetting().SubmissionMinRewardQuota
 	}
-	_, maxRewardQuota := resolveGrowthRewardQuotaRange(item)
-	if maxRewardQuota > 0 && rewardQuota > maxRewardQuota {
+	minRewardQuota, maxRewardQuota := resolveGrowthRewardQuotaRange(item)
+	if rewardQuota < minRewardQuota {
+		return nil, errors.New("reward quota is below minimum")
+	}
+	if rewardQuota > maxRewardQuota {
 		return nil, errors.New("reward quota exceeds maximum")
 	}
 	now := time.Now().Unix()
@@ -781,7 +798,15 @@ func ApproveGrowthSubmission(id int, reviewerId int, req GrowthReviewRequest) (*
 		if res.RowsAffected == 0 {
 			return errors.New("submission already reviewed")
 		}
+		submission.Status = model.GrowthSubmissionStatusApproved
+		submission.ReviewerId = reviewerId
+		submission.ReviewNote = req.ReviewNote
+		submission.ReviewedAt = now
+		if err := model.CreateGrowthSubmissionEventTx(tx, &submission, model.PromotionEventTypeGrowthSubmissionApproved); err != nil {
+			return err
+		}
 		reward := model.NewSettledGrowthReward(submission.UserId, submission.ItemCode, rewardQuota, submission.Id, req.ReviewNote)
+		reward.ClaimKey = growthRewardClaimKey(submission.UserId, item, submission.Id)
 		reward.CreatedAt = now
 		reward.AvailableAt = now
 		reward.SettledAt = now
@@ -806,15 +831,28 @@ func RejectGrowthSubmission(id int, reviewerId int, note string) (*model.GrowthS
 	if submission.Status != model.GrowthSubmissionStatusPending {
 		return nil, errors.New("submission already reviewed")
 	}
-	err := model.DB.Model(&model.GrowthSubmission{}).
-		Where("id = ?", id).
-		Updates(map[string]interface{}{
-			"status":      model.GrowthSubmissionStatusRejected,
-			"reviewer_id": reviewerId,
-			"review_note": note,
-			"reviewed_at": time.Now().Unix(),
-		}).Error
-	if err != nil {
+	now := time.Now().Unix()
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.GrowthSubmission{}).
+			Where("id = ? AND status = ?", id, model.GrowthSubmissionStatusPending).
+			Updates(map[string]interface{}{
+				"status":      model.GrowthSubmissionStatusRejected,
+				"reviewer_id": reviewerId,
+				"review_note": note,
+				"reviewed_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errors.New("submission already reviewed")
+		}
+		submission.Status = model.GrowthSubmissionStatusRejected
+		submission.ReviewerId = reviewerId
+		submission.ReviewNote = note
+		submission.ReviewedAt = now
+		return model.CreateGrowthSubmissionEventTx(tx, &submission, model.PromotionEventTypeGrowthSubmissionRejected)
+	}); err != nil {
 		return nil, err
 	}
 	if err := model.DB.Where("id = ?", id).First(&submission).Error; err != nil {
@@ -847,9 +885,6 @@ func GetGrowthAdminStats() (map[string]interface{}, error) {
 }
 
 func getGrowthRewardItem(code string) (*model.GrowthRewardItem, error) {
-	if err := EnsureDefaultGrowthRewardItems(); err != nil {
-		return nil, err
-	}
 	var item model.GrowthRewardItem
 	err := model.DB.Where("code = ?", code).First(&item).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -967,11 +1002,27 @@ func countGrowthRewardsSinceTx(tx *gorm.DB, userId int, itemCode string, since i
 }
 
 func lockUserForRewardTx(tx *gorm.DB, userId int) error {
-	if tx == nil {
-		return errors.New("transaction is required")
+	return model.LockUserForGrowthRewardTx(tx, userId)
+}
+
+func growthRewardClaimKey(userId int, item *model.GrowthRewardItem, sourceId int) *string {
+	if item == nil || userId <= 0 {
+		return nil
 	}
-	var user model.User
-	return tx.Set("gorm:query_option", "FOR UPDATE").Select("id").Where("id = ?", userId).First(&user).Error
+	var key string
+	switch {
+	case sourceId > 0:
+		key = fmt.Sprintf("submission:%d", sourceId)
+	case item.Code == model.GrowthRewardItemMonthlySpendTarget:
+		key = fmt.Sprintf("%d:%s:%s", userId, item.Code, time.Now().Format("2006-01"))
+	case item.Code == model.GrowthRewardItemDailyCheckin || item.DailyLimit > 0:
+		key = fmt.Sprintf("%d:%s:%s", userId, item.Code, time.Now().Format("2006-01-02"))
+	case item.OncePerUser:
+		key = fmt.Sprintf("%d:%s:once", userId, item.Code)
+	default:
+		return nil
+	}
+	return &key
 }
 
 func canClaimAutoRewardItem(userId int, item *model.GrowthRewardItem) (bool, string, error) {
@@ -990,6 +1041,7 @@ func canClaimAutoRewardItem(userId int, item *model.GrowthRewardItem) (bool, str
 		var count int64
 		err := model.DB.Model(&model.TopUp{}).
 			Where("user_id = ? AND status = ?", userId, common.TopUpStatusSuccess).
+			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{model.TopUpRefundStatusFull, model.TopUpRefundStatusDisputed}).
 			Count(&count).Error
 		return count > 0, "Complete your first top-up first", err
 	case model.GrowthRewardItemThreeDayUsage:
@@ -1034,6 +1086,7 @@ func claimDailyCheckin(userId int, item *model.GrowthRewardItem) (*model.GrowthR
 	now := time.Now().Unix()
 	checkin := model.NewCheckinRecord(userId, rewardQuota)
 	reward := model.NewSettledGrowthReward(userId, item.Code, rewardQuota, 0, "")
+	reward.ClaimKey = growthRewardClaimKey(userId, item, 0)
 	reward.CreatedAt = now
 	reward.AvailableAt = now
 	reward.SettledAt = now
@@ -1102,7 +1155,7 @@ func checkRewardBudgetTx(tx *gorm.DB, userId int, rewardQuota int) error {
 	if setting.UserDailyRewardLimitQuota > 0 {
 		var total int64
 		if err := tx.Model(&model.GrowthReward{}).
-			Where("user_id = ? AND created_at >= ? AND status IN ?", userId, todayStart, []string{model.GrowthRewardStatusPending, model.GrowthRewardStatusSettled}).
+			Where("user_id = ? AND created_at >= ? AND status IN ?", userId, todayStart, []string{model.GrowthRewardStatusPending, model.GrowthRewardStatusSettled, model.GrowthRewardStatusTransferred}).
 			Select("COALESCE(SUM(reward_quota), 0)").
 			Scan(&total).Error; err != nil {
 			return err
@@ -1112,16 +1165,7 @@ func checkRewardBudgetTx(tx *gorm.DB, userId int, rewardQuota int) error {
 		}
 	}
 	if setting.SiteDailyBudgetQuota > 0 {
-		var total int64
-		if err := tx.Model(&model.GrowthReward{}).
-			Where("created_at >= ? AND status IN ?", todayStart, []string{model.GrowthRewardStatusPending, model.GrowthRewardStatusSettled}).
-			Select("COALESCE(SUM(reward_quota), 0)").
-			Scan(&total).Error; err != nil {
-			return err
-		}
-		if total+int64(rewardQuota) > int64(setting.SiteDailyBudgetQuota) {
-			return errors.New("daily site reward budget reached")
-		}
+		return model.ReserveGrowthRewardBudgetTx(tx, time.Now().Format("2006-01-02"), rewardQuota, setting.SiteDailyBudgetQuota)
 	}
 	return nil
 }

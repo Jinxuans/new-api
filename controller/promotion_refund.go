@@ -17,21 +17,16 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func reverseInvitationRebateByTradeNoFromWebhook(ctx context.Context, provider string, tradeNo string, refundTradeNo string, remark string) bool {
-	if tradeNo == "" {
-		logger.LogWarn(ctx, fmt.Sprintf("%s 退款/拒付回调缺少本地订单号，跳过推广返佣冲正 refund_trade_no=%s", provider, refundTradeNo))
-		return false
-	}
-	rebate, err := model.ReverseInvitationRebateByTradeNo(tradeNo, refundTradeNo, remark)
+func handlePromotionRefundFromWebhook(ctx context.Context, input model.PromotionRefundInput) error {
+	refundCase, err := model.HandlePromotionRefund(input)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("%s 推广返佣冲正失败 trade_no=%s refund_trade_no=%s error=%q", provider, tradeNo, refundTradeNo, err.Error()))
-		return false
+		logger.LogError(ctx, fmt.Sprintf("%s 推广退款处理失败 trade_no=%s refund_trade_no=%s error=%q", input.Provider, input.TradeNo, input.RefundTradeNo, err.Error()))
+		return err
 	}
-	if rebate == nil {
-		logger.LogInfo(ctx, fmt.Sprintf("%s 退款/拒付订单无推广返佣可冲正 trade_no=%s refund_trade_no=%s", provider, tradeNo, refundTradeNo))
-		return true
+	if refundCase.Status == model.PromotionRefundCaseStatusPendingReview {
+		logger.LogWarn(ctx, fmt.Sprintf("%s 推广退款已进入人工复核 trade_no=%s refund_trade_no=%s case_id=%d reason=%q", input.Provider, input.TradeNo, input.RefundTradeNo, refundCase.Id, refundCase.Reason))
+	} else {
+		logger.LogInfo(ctx, fmt.Sprintf("%s 推广退款已自动冲正 trade_no=%s refund_trade_no=%s case_id=%d", input.Provider, input.TradeNo, input.RefundTradeNo, refundCase.Id))
 	}
-	model.RecordInvitationRebateLog(rebate)
-	logger.LogInfo(ctx, fmt.Sprintf("%s 推广返佣已冲正 trade_no=%s refund_trade_no=%s rebate_id=%d inviter_id=%d", provider, tradeNo, refundTradeNo, rebate.Id, rebate.InviterId))
-	return true
+	return nil
 }

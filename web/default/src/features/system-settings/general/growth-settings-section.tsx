@@ -16,12 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ReactNode } from 'react'
-import { z } from 'zod'
-import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { ReactNode } from 'react'
+import { useForm, type Resolver } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -36,79 +35,19 @@ import {
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+
 import { SettingsSection } from '../components/settings-section'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { useUpdateGrowthConfig } from '../hooks/use-update-growth-config'
+import {
+  createRewardProgramSchema,
+  toRewardProgramConfig,
+  type RewardProgramFormValues,
+} from './growth-admin-config'
 
-const schema = z
-  .object({
-    enabled: z.boolean(),
-    dailyCheckinEnabled: z.boolean(),
-    dailyCheckinMinRewardQuota: z.coerce.number().int().min(0),
-    dailyCheckinMaxRewardQuota: z.coerce.number().int().min(0),
-    firstAPIKeyRewardQuota: z.coerce.number().int().min(0),
-    firstAPIRequestRewardQuota: z.coerce.number().int().min(0),
-    firstTopUpRewardQuota: z.coerce.number().int().min(0),
-    threeDayUsageRewardQuota: z.coerce.number().int().min(0),
-    monthlySpendRewardQuota: z.coerce.number().int().min(0),
-    monthlySpendTargetQuota: z.coerce.number().int().min(0),
-    inviteRebatePercentage: z.coerce.number().min(0),
-    inviteFirstRequestRewardQuota: z.coerce.number().int().min(0),
-    inviteFirstTopUpRewardQuota: z.coerce.number().int().min(0),
-    rebateFreezeDays: z.coerce.number().int().min(0),
-    userDailyRewardLimitQuota: z.coerce.number().int().min(0),
-    siteDailyBudgetQuota: z.coerce.number().int().min(0),
-    submissionEnabled: z.boolean(),
-    submissionMinRewardQuota: z.coerce.number().int().min(0),
-    submissionMaxRewardQuota: z.coerce.number().int().min(0),
-  })
-  .refine(
-    (values) =>
-      values.dailyCheckinMaxRewardQuota >=
-      values.dailyCheckinMinRewardQuota,
-    {
-      path: ['dailyCheckinMaxRewardQuota'],
-      message:
-        'Maximum check-in quota must be greater than or equal to the minimum.',
-    }
-  )
-  .refine(
-    (values) =>
-      values.submissionMaxRewardQuota >= values.submissionMinRewardQuota,
-    {
-      path: ['submissionMaxRewardQuota'],
-      message:
-        'Submission maximum reward must be greater than or equal to the minimum.',
-    }
-  )
-
-type Values = z.infer<typeof schema>
 type NumberFieldName = Exclude<
-  keyof Values,
+  keyof RewardProgramFormValues,
   'enabled' | 'dailyCheckinEnabled' | 'submissionEnabled'
 >
-
-const optionKeys: Record<keyof Values, string> = {
-  enabled: 'growth_setting.enabled',
-  dailyCheckinEnabled: 'growth_setting.daily_checkin_enabled',
-  dailyCheckinMinRewardQuota: 'growth_setting.daily_checkin_min_reward_quota',
-  dailyCheckinMaxRewardQuota: 'growth_setting.daily_checkin_max_reward_quota',
-  firstAPIKeyRewardQuota: 'growth_setting.first_api_key_reward_quota',
-  firstAPIRequestRewardQuota: 'growth_setting.first_api_request_reward_quota',
-  firstTopUpRewardQuota: 'growth_setting.first_topup_reward_quota',
-  threeDayUsageRewardQuota: 'growth_setting.three_day_usage_reward_quota',
-  monthlySpendRewardQuota: 'growth_setting.monthly_spend_reward_quota',
-  monthlySpendTargetQuota: 'growth_setting.monthly_spend_target_quota',
-  inviteRebatePercentage: 'InviteRebatePercentage',
-  inviteFirstRequestRewardQuota:
-    'growth_setting.invite_first_request_reward_quota',
-  inviteFirstTopUpRewardQuota: 'growth_setting.invite_first_topup_reward_quota',
-  rebateFreezeDays: 'growth_setting.rebate_freeze_days',
-  userDailyRewardLimitQuota: 'growth_setting.user_daily_reward_limit_quota',
-  siteDailyBudgetQuota: 'growth_setting.site_daily_budget_quota',
-  submissionEnabled: 'growth_setting.submission_enabled',
-  submissionMinRewardQuota: 'growth_setting.submission_min_reward_quota',
-  submissionMaxRewardQuota: 'growth_setting.submission_max_reward_quota',
-}
 
 const automationFields: Array<{
   name: NumberFieldName
@@ -164,35 +103,6 @@ const dailyCheckinFields: Array<{
   },
 ]
 
-const invitationFields: Array<{
-  name: NumberFieldName
-  label: string
-  description: string
-}> = [
-  {
-    name: 'inviteRebatePercentage',
-    label: 'Invitation rebate percentage',
-    description: 'Percentage awarded to inviters from invited user top-ups.',
-  },
-  {
-    name: 'inviteFirstRequestRewardQuota',
-    label: 'Inviter first request reward',
-    description:
-      'Quota awarded to the inviter when an invited user completes the first API request.',
-  },
-  {
-    name: 'inviteFirstTopUpRewardQuota',
-    label: 'Inviter first top-up reward',
-    description:
-      'Quota awarded to the inviter when an invited user completes the first top-up.',
-  },
-  {
-    name: 'rebateFreezeDays',
-    label: 'Rebate freeze days',
-    description: 'Days before future rebates become settleable.',
-  },
-]
-
 const budgetFields: Array<{
   name: NumberFieldName
   label: string
@@ -229,51 +139,37 @@ const submissionFields: Array<{
   },
 ]
 
-export function GrowthSettingsSection({
-  defaultValues,
-}: {
-  defaultValues: Values
+export function RewardProgramSettingsSection(props: {
+  defaultValues: RewardProgramFormValues
 }) {
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
+  const updateGrowthConfig = useUpdateGrowthConfig()
 
-  const form = useForm<Values>({
-    resolver: zodResolver(schema) as unknown as Resolver<Values>,
-    defaultValues,
+  const form = useForm<RewardProgramFormValues>({
+    resolver: zodResolver(
+      createRewardProgramSchema((key) => t(key))
+    ) as unknown as Resolver<RewardProgramFormValues>,
+    defaultValues: props.defaultValues,
   })
 
   const { isDirty, isSubmitting } = form.formState
   const enabled = form.watch('enabled')
   const dailyCheckinEnabled = form.watch('dailyCheckinEnabled')
   const submissionEnabled = form.watch('submissionEnabled')
-  const saving = updateOption.isPending || isSubmitting
+  const saving = updateGrowthConfig.isPending || isSubmitting
 
-  async function onSubmit(values: Values) {
-    const updates: Array<{ key: string; value: string }> = []
-
-    for (const key of Object.keys(optionKeys) as Array<keyof Values>) {
-      if (values[key] !== defaultValues[key]) {
-        updates.push({ key: optionKeys[key], value: String(values[key]) })
-      }
-    }
-
-    if (updates.length === 0) {
-      toast.info(t('No changes to save'))
-      return
-    }
-
-    for (const update of updates) {
-      await updateOption.mutateAsync(update)
-    }
-
-    form.reset(values)
+  function onSubmit(values: RewardProgramFormValues) {
+    updateGrowthConfig.mutate(
+      { reward_program: toRewardProgramConfig(values) },
+      { onSuccess: () => form.reset(values) }
+    )
   }
 
   return (
     <SettingsSection
-      title={t('Promotion & Rewards')}
+      title={t('Reward Program')}
       description={t(
-        'Configure activation, retention, referral, and content rewards.'
+        'Configure check-in, activation, retention, and content rewards.'
       )}
     >
       <Form {...form}>
@@ -428,38 +324,6 @@ export function GrowthSettingsSection({
           </SettingsGroup>
 
           <SettingsGroup
-            title={t('Invitation rebate rules')}
-            description={t(
-              'Referral rebate and milestone rewards shared by the promotion center.'
-            )}
-          >
-            <FieldGrid>
-              {invitationFields.map((item) => (
-                <FormField
-                  key={item.name}
-                  control={form.control}
-                  name={item.name}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t(item.label)}</FormLabel>
-                      <FormControl>
-                        <Input
-                          type='number'
-                          min={0}
-                          disabled={!submissionEnabled}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormDescription>{t(item.description)}</FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              ))}
-            </FieldGrid>
-          </SettingsGroup>
-
-          <SettingsGroup
             title={t('Content submission rules')}
             description={t(
               'Default reward range for reviewed promotion proof submissions.'
@@ -519,7 +383,7 @@ export function GrowthSettingsSection({
           </SettingsGroup>
 
           <Button type='submit' disabled={!isDirty || saving} className='w-fit'>
-            {saving ? t('Saving...') : t('Save growth settings')}
+            {saving ? t('Saving...') : t('Save reward program')}
           </Button>
         </form>
       </Form>

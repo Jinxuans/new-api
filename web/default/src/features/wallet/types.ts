@@ -234,7 +234,7 @@ export interface UserWalletData {
   used_quota: number
   /** Total request count */
   request_count: number
-  /** Affiliate quota (pending rewards) */
+  /** Settled referral credit available to transfer to the main balance */
   aff_quota: number
   /** Total affiliate quota earned (historical) */
   aff_history_quota: number

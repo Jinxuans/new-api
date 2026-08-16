@@ -7,24 +7,9 @@ import (
 	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
-
-type adminGrowthRewardItemRequest struct {
-	Code          string  `json:"code"`
-	Title         string  `json:"title"`
-	Description   string  `json:"description"`
-	Introduction  string  `json:"introduction"`
-	RewardQuota   int     `json:"reward_quota"`
-	ItemType      string  `json:"item_type"`
-	ActionURL     string  `json:"action_url"`
-	ClaimPassword *string `json:"claim_password"`
-	Enabled       bool    `json:"enabled"`
-	OncePerUser   bool    `json:"once_per_user"`
-	DailyLimit    int     `json:"daily_limit"`
-}
 
 type claimGrowthRewardItemRequest struct {
 	Password string `json:"password"`
@@ -43,6 +28,34 @@ type promotionWithdrawalRequest struct {
 type promotionWithdrawalReviewRequest struct {
 	TradeNo    string `json:"trade_no"`
 	ReviewNote string `json:"review_note"`
+}
+
+func AdminGetGrowthConfig(c *gin.Context) {
+	common.ApiSuccess(c, service.GetAdminGrowthConfig())
+}
+
+func AdminUpdateGrowthConfig(c *gin.Context) {
+	var req service.AdminGrowthConfigUpdate
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := service.UpdateAdminGrowthConfig(req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	sections := make([]string, 0, 2)
+	if req.RewardProgram != nil {
+		sections = append(sections, "reward_program")
+	}
+	if req.ReferralProgram != nil {
+		sections = append(sections, "referral_program")
+	}
+	recordManageAudit(c, "growth.config.update", map[string]interface{}{
+		"sections": sections,
+	})
+	common.ApiSuccess(c, service.GetAdminGrowthConfig())
 }
 
 func GetGrowthSummary(c *gin.Context) {
@@ -181,12 +194,8 @@ func GetPromotionWithdrawals(c *gin.Context) {
 }
 
 func AdminGetGrowthRewardItems(c *gin.Context) {
-	if err := service.EnsureDefaultGrowthRewardItems(); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	var items []*model.GrowthRewardItem
-	if err := model.DB.Order("id ASC").Find(&items).Error; err != nil {
+	items, err := service.ListAdminGrowthRewardItems()
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -194,30 +203,13 @@ func AdminGetGrowthRewardItems(c *gin.Context) {
 }
 
 func AdminCreateGrowthRewardItem(c *gin.Context) {
-	var req adminGrowthRewardItemRequest
+	var req service.AdminGrowthRewardItemCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	item := &model.GrowthRewardItem{
-		Code:         req.Code,
-		Title:        req.Title,
-		Description:  req.Description,
-		Introduction: req.Introduction,
-		RewardQuota:  req.RewardQuota,
-		ItemType:     req.ItemType,
-		ActionURL:    req.ActionURL,
-		Enabled:      req.Enabled,
-		OncePerUser:  req.OncePerUser,
-		DailyLimit:   req.DailyLimit,
-	}
-	if item.ItemType == model.GrowthRewardItemTypeManual || item.ItemType == model.GrowthRewardItemTypeSemiAuto {
-		item.OncePerUser = false
-	}
-	if req.ClaimPassword != nil {
-		item.ClaimPassword = *req.ClaimPassword
-	}
-	if err := model.DB.Create(item).Error; err != nil {
+	item, err := service.CreateAdminGrowthRewardItem(req)
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -230,33 +222,13 @@ func AdminUpdateGrowthRewardItem(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	var item model.GrowthRewardItem
-	if err = model.DB.Where("id = ?", id).First(&item).Error; err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	var req adminGrowthRewardItemRequest
+	var req service.AdminGrowthRewardItemUpdateRequest
 	if err = c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	item.Code = req.Code
-	item.Title = req.Title
-	item.Description = req.Description
-	item.Introduction = req.Introduction
-	item.RewardQuota = req.RewardQuota
-	item.ItemType = req.ItemType
-	item.ActionURL = req.ActionURL
-	if req.ClaimPassword != nil {
-		item.ClaimPassword = *req.ClaimPassword
-	}
-	item.Enabled = req.Enabled
-	item.OncePerUser = req.OncePerUser
-	if item.ItemType == model.GrowthRewardItemTypeManual || item.ItemType == model.GrowthRewardItemTypeSemiAuto {
-		item.OncePerUser = false
-	}
-	item.DailyLimit = req.DailyLimit
-	if err = model.DB.Save(&item).Error; err != nil {
+	item, err := service.UpdateAdminGrowthRewardItem(id, req)
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -277,7 +249,7 @@ func AdminGetGrowthRewards(c *gin.Context) {
 
 func AdminGetGrowthSubmissions(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	submissions, total, err := service.AdminListGrowthSubmissions(pageInfo)
+	submissions, total, err := service.ListAdminGrowthSubmissions(pageInfo, c.Query("status"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -289,7 +261,7 @@ func AdminGetGrowthSubmissions(c *gin.Context) {
 
 func AdminGetPromotionWithdrawals(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	withdrawals, total, err := service.AdminListPromotionWithdrawals(pageInfo)
+	withdrawals, total, err := service.ListAdminPromotionWithdrawals(pageInfo, c.Query("status"))
 	if err != nil {
 		common.ApiError(c, err)
 		return

@@ -36,6 +36,9 @@ const (
 	PromotionEventTypeCommissionWithdrawPaid       = "commission_withdraw_paid"
 	PromotionEventTypeCommissionReversed           = "commission_reversed"
 	PromotionEventTypeGrowthRewardSettled          = "growth_reward_settled"
+	PromotionEventTypeGrowthSubmissionCreated      = "growth_submission_created"
+	PromotionEventTypeGrowthSubmissionApproved     = "growth_submission_approved"
+	PromotionEventTypeGrowthSubmissionRejected     = "growth_submission_rejected"
 )
 
 type PromotionEvent struct {
@@ -234,7 +237,7 @@ func createPromotionWithdrawalStatusEventTx(tx *gorm.DB, withdrawal *PromotionWi
 }
 
 func CreateInvitationRewardEventTx(tx *gorm.DB, reward *InvitationReward) error {
-	if reward == nil || reward.Id <= 0 {
+	if reward == nil || reward.Id <= 0 || reward.RewardQuota <= 0 {
 		return nil
 	}
 	eventType := PromotionEventTypeInvitationRegisterReward
@@ -287,6 +290,41 @@ func CreateGrowthRewardEventTx(tx *gorm.DB, reward *GrowthReward) error {
 	})
 }
 
+func CreateGrowthSubmissionEventTx(tx *gorm.DB, submission *GrowthSubmission, eventType string) error {
+	if submission == nil || submission.Id <= 0 {
+		return nil
+	}
+	title := ""
+	remark := submission.ReviewNote
+	createdAt := submission.ReviewedAt
+	switch eventType {
+	case PromotionEventTypeGrowthSubmissionCreated:
+		title = "Growth submission created"
+		remark = submission.Remark
+		createdAt = submission.CreatedAt
+	case PromotionEventTypeGrowthSubmissionApproved:
+		title = "Growth submission approved"
+	case PromotionEventTypeGrowthSubmissionRejected:
+		title = "Growth submission rejected"
+	default:
+		return nil
+	}
+	if createdAt == 0 {
+		createdAt = submission.CreatedAt
+	}
+	return CreatePromotionEventTx(tx, &PromotionEvent{
+		UserId:      submission.UserId,
+		EventType:   eventType,
+		SourceTable: PromotionEventSourceGrowthSubmission,
+		SourceId:    submission.Id,
+		Direction:   PromotionEventDirectionStatus,
+		Status:      submission.Status,
+		Title:       title,
+		Remark:      remark,
+		CreatedAt:   createdAt,
+	})
+}
+
 func CreatePromotionCommissionEventTx(tx *gorm.DB, ledger *PromotionCommissionLedger, eventType string) error {
 	if ledger == nil || ledger.Id <= 0 || eventType == "" {
 		return nil
@@ -301,7 +339,6 @@ func CreatePromotionCommissionEventTx(tx *gorm.DB, ledger *PromotionCommissionLe
 		title = "Cash commission pending settlement"
 	case PromotionEventTypeCommissionSettled:
 		direction = PromotionEventDirectionIncome
-		quotaDelta = ledger.QuotaEquivalent
 		title = "Cash commission settled"
 		createdAt = ledger.SettledAt
 	case PromotionEventTypeCommissionReversed:

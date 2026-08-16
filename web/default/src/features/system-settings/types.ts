@@ -39,6 +39,50 @@ export type UpdateOptionResponse = {
   message: string
 }
 
+export type RewardProgramConfig = {
+  enabled: boolean
+  daily_checkin_enabled: boolean
+  daily_checkin_min_reward_quota: number
+  daily_checkin_max_reward_quota: number
+  first_api_key_reward_quota: number
+  first_api_request_reward_quota: number
+  first_topup_reward_quota: number
+  three_day_usage_reward_quota: number
+  monthly_spend_reward_quota: number
+  monthly_spend_target_quota: number
+  user_daily_reward_limit_quota: number
+  site_daily_budget_quota: number
+  submission_enabled: boolean
+  submission_min_reward_quota: number
+  submission_max_reward_quota: number
+}
+
+export type ReferralProgramConfig = {
+  inviter_registration_reward_quota: number
+  invitee_registration_reward_quota: number
+  invite_rebate_percentage: number
+  invite_first_request_reward_quota: number
+  invite_first_topup_reward_quota: number
+  rebate_freeze_days: number
+}
+
+export type AdminGrowthConfig = {
+  reward_program: RewardProgramConfig
+  referral_program: ReferralProgramConfig
+  compliance_enabled: boolean
+}
+
+export type AdminGrowthConfigUpdate = {
+  reward_program?: RewardProgramConfig
+  referral_program?: ReferralProgramConfig
+}
+
+export type AdminGrowthConfigResponse = {
+  success: boolean
+  message: string
+  data: AdminGrowthConfig
+}
+
 export type ConfirmPaymentComplianceResponse = {
   success: boolean
   message: string
@@ -257,7 +301,6 @@ export type BillingSettings = {
   PreConsumedQuota: number
   QuotaForInviter: number
   QuotaForInvitee: number
-  InviteRebatePercentage: number
   TopUpLink: string
   'general_setting.docs_link': string
   'quota_setting.enable_free_model_pre_consume': boolean

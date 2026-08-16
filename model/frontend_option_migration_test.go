@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,10 +171,19 @@ func TestMigrateRetiredFrontendOptionsKeepsEmptyAuthoritativeTargets(t *testing.
 func TestThemeOptionIsPersistedAndPublished(t *testing.T) {
 	db := useFrontendOptionMigrationDB(t)
 	previousMap := common.OptionMap
-	t.Cleanup(func() { common.OptionMap = previousMap })
+	previousTheme := system_setting.GetThemeSettings().Frontend
+	previousRuntimeTheme := common.GetTheme()
+	t.Cleanup(func() {
+		common.OptionMap = previousMap
+		system_setting.GetThemeSettings().Frontend = previousTheme
+		common.SetTheme(previousRuntimeTheme)
+	})
 	common.OptionMap = map[string]string{}
+	system_setting.GetThemeSettings().Frontend = "classic"
+	common.SetTheme("classic")
 
 	require.NoError(t, UpdateOption("theme.frontend", "default"))
 	assert.Equal(t, "default", requireOptionValue(t, db, "theme.frontend"))
 	assert.Equal(t, "default", common.OptionMap["theme.frontend"])
+	assert.Equal(t, "default", common.GetTheme())
 }

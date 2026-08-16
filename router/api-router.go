@@ -168,9 +168,16 @@ func SetApiRouter(router *gin.Engine) {
 			growthRoute.POST("/submissions", controller.CreateGrowthSubmission)
 			growthRoute.GET("/submissions", controller.GetGrowthSubmissions)
 			growthRoute.GET("/commissions", controller.GetPromotionCommissionLedgers)
+			growthRoute.POST("/commissions/settle", controller.SettleDuePromotionCommissions)
 			growthRoute.POST("/commissions/transfer", controller.TransferPromotionCommissionsToQuota)
 			growthRoute.POST("/withdrawals", controller.CreatePromotionWithdrawal)
 			growthRoute.GET("/withdrawals", controller.GetPromotionWithdrawals)
+		}
+		growthAdminConfigRoute := apiRouter.Group("/growth/admin/config")
+		growthAdminConfigRoute.Use(middleware.RootAuth())
+		{
+			growthAdminConfigRoute.GET("", controller.AdminGetGrowthConfig)
+			growthAdminConfigRoute.PUT("", controller.AdminUpdateGrowthConfig)
 		}
 		growthAdminRoute := apiRouter.Group("/growth/admin")
 		growthAdminRoute.Use(middleware.AdminAuth())
@@ -189,6 +196,8 @@ func SetApiRouter(router *gin.Engine) {
 			growthAdminRoute.POST("/withdrawals/:id/approve", controller.AdminApprovePromotionWithdrawal)
 			growthAdminRoute.POST("/withdrawals/:id/reject", controller.AdminRejectPromotionWithdrawal)
 			growthAdminRoute.POST("/withdrawals/:id/paid", controller.AdminMarkPromotionWithdrawalPaid)
+			growthAdminRoute.GET("/refund-cases", controller.AdminGetPromotionRefundCases)
+			growthAdminRoute.POST("/refund-cases/:id/resolve", controller.AdminResolvePromotionRefundCase)
 			growthAdminRoute.GET("/stats", controller.AdminGetGrowthStats)
 		}
 

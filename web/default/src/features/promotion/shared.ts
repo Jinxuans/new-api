@@ -19,6 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import dayjs from '@/lib/dayjs'
 
 export type GrowthSummary = {
+  task_reward_earned_quota: number
+  task_reward_pending_quota: number
+  referral_credit_available_quota: number
+  referral_credit_total_quota: number
   available_reward_quota: number
   pending_reward_quota: number
   total_reward_quota: number
@@ -131,51 +135,17 @@ export type GrowthSubmission = {
   review_note?: string
 }
 
-export type InvitationRecord = {
-  user_id: number
-  username?: string
-  display_name?: string
-  created_at?: number | string
-  request_count?: number
-  total_topup_amount?: number | string
-  total_contribution_rebate?: number | string
-  total_rebate_quota?: number | string
-  first_request_completed?: boolean
-  first_topup_completed?: boolean
-  first_request_reward_quota?: number | string
-  first_topup_reward_quota?: number | string
-  register_reward_quota?: number | string
-  first_request_rule_reward_quota?: number | string
-  first_topup_rule_reward_quota?: number | string
-  invite_rebate_percentage?: number | string
-}
-
-export type InvitationRebate = {
+export type InvitationReward = {
   id: number
+  invitee_id: number
   invitee_name?: string
-  invitee_id?: number
-  trade_no?: string
-  top_up_money?: number | string
-  payment_method?: string
-  payment_provider?: string
-  rebate_percentage?: number | string
-  rebate_amount?: number | string
-  rebate_quota?: number | string
-  reward_quota?: number | string
-  reward_type?: string
-  freeze_days?: number | string
-  settle_after?: number | string
-  risk_status?: string
-  refund_trade_no?: string
-  reversal_quota?: number | string
-  reversed_at?: number | string
+  reward_type: string
+  reward_quota: number
+  status: string
   remark?: string
-  status?: string
-  created_at?: number | string
-  settled_at?: number | string
-  trigger_at?: number | string
-  trigger_top_up_id?: number
-  trigger_trade_no?: string
+  created_at: number
+  settled_at?: number
+  trigger_at?: number
 }
 
 export const rewardItemCopy: Record<
@@ -252,8 +222,9 @@ export function statusVariant(status: string) {
     status === 'pending' ||
     status === 'pending_review' ||
     status === 'withdrawing'
-  )
+  ) {
     return 'secondary'
+  }
   if (
     status === 'rejected' ||
     status === 'frozen' ||

@@ -167,7 +167,10 @@ var TelegramBotName = ""
 var QuotaForNewUser = 0
 var QuotaForInviter = 0
 var QuotaForInvitee = 0
-var InviteRebatePercentage = 10.0
+
+// Deprecated: use operation_setting.GetInviteRebatePercentage for business
+// logic. This mirror remains for legacy option consumers during migration.
+var InviteRebatePercentage = 0.0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false

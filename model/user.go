@@ -553,25 +553,27 @@ func inviteUser(inviterId int, inviteeId int) (err error) {
 	if inviterId <= 0 || inviteeId <= 0 {
 		return nil
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
+	var reward *InvitationReward
+	err = DB.Transaction(func(tx *gorm.DB) error {
 		user := &User{}
 		if err := lockForUpdate(tx).Where("id = ?", inviterId).First(user).Error; err != nil {
 			return err
 		}
 
-		reward, err := CreateInvitationRegisterRewardTx(tx, inviterId, inviteeId)
+		var err error
+		reward, err = CreateInvitationRegisterRewardTx(tx, inviterId, inviteeId)
 		if err != nil {
 			return err
 		}
-		if reward == nil {
-			return nil
-		}
-
-		user.AffCount++
-		user.AffQuota += reward.RewardQuota
-		user.AffHistoryQuota += reward.RewardQuota
-		return tx.Save(user).Error
+		return nil
 	})
+	if err == nil {
+		_ = InvalidateUserCache(inviterId)
+		if reward != nil && reward.RewardQuota > 0 {
+			RecordLog(inviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", logger.LogQuota(reward.RewardQuota)))
+		}
+	}
+	return err
 }
 
 func (user *User) TransferAffQuotaToQuota(quota int) error {
@@ -597,15 +599,25 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	if user.AffQuota < quota {
 		return errors.New("邀请额度不足！")
 	}
+	maxCurrentQuota, err := topUpQuotaMaxCurrent(quota)
+	if err != nil || user.Quota > maxCurrentQuota {
+		return ErrTopUpQuotaLimitExceeded
+	}
 
-	// 更新用户额度
+	result := tx.Model(&User{}).
+		Where("id = ? AND aff_quota >= ? AND quota <= ?", user.Id, quota, maxCurrentQuota).
+		Updates(map[string]interface{}{
+			"aff_quota": gorm.Expr("aff_quota - ?", quota),
+			"quota":     gorm.Expr("quota + ?", quota),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("邀请额度或钱包状态已变化，请重试")
+	}
 	user.AffQuota -= quota
 	user.Quota += quota
-
-	// 保存用户状态
-	if err := tx.Save(user).Error; err != nil {
-		return err
-	}
 	now := common.GetTimestamp()
 	if err := CreatePromotionEventTx(tx, &PromotionEvent{
 		EventKey:    fmt.Sprintf("%s:%s:%d:%d", PromotionEventTypePromotionRewardTransferred, PromotionEventSourceInvitationQuota, user.Id, now),
@@ -623,7 +635,13 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	}
 
 	// 提交事务
-	return tx.Commit().Error
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+	if err := InvalidateUserCache(user.Id); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user cache after invitation credit transfer: user_id=%d error=%v", user.Id, err))
+	}
+	return nil
 }
 
 func (user *User) prepareForInsert(tx *gorm.DB) error {
@@ -726,16 +744,12 @@ func (user *User) finishInsert(inviterId int) {
 	if common.QuotaForNewUser > 0 {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", logger.LogQuota(common.QuotaForNewUser)))
 	}
-	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
+	if inviterId != 0 {
+		if operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInvitee > 0 {
 			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
-		if common.QuotaForInviter > 0 {
-			//_ = IncreaseUserQuota(inviterId, common.QuotaForInviter)
-			RecordLog(inviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", logger.LogQuota(common.QuotaForInviter)))
-			_ = inviteUser(inviterId, user.Id)
-		}
+		_ = inviteUser(inviterId, user.Id)
 	}
 }
 
@@ -787,15 +801,12 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 	if common.QuotaForNewUser > 0 {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", logger.LogQuota(common.QuotaForNewUser)))
 	}
-	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
+	if inviterId != 0 {
+		if operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInvitee > 0 {
 			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
-		if common.QuotaForInviter > 0 {
-			RecordLog(inviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", logger.LogQuota(common.QuotaForInviter)))
-			_ = inviteUser(inviterId, user.Id)
-		}
+		_ = inviteUser(inviterId, user.Id)
 	}
 }
 

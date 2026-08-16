@@ -54,14 +54,17 @@ type WaffoPancakeWebhookEvent struct {
 
 type WaffoPancakeWebhookData struct {
 	// OrderID = Pancake ORD_* (logs); OrderMerchantExternalID = our trade_no (lookup).
-	OrderID                       string
-	OrderMerchantExternalID       string
-	BuyerEmail                    string
-	Currency                      string
-	Amount                        string
-	TaxAmount                     string
-	ProductName                   string
-	MerchantProvidedBuyerIdentity string
+	OrderID                        string
+	OrderMerchantExternalID        string
+	RefundTicketMerchantExternalID string
+	BuyerEmail                     string
+	Currency                       string
+	Amount                         string
+	TaxAmount                      string
+	ProductName                    string
+	MerchantProvidedBuyerIdentity  string
+	RefundStatus                   string
+	RefundReason                   string
 }
 
 // NormalizedEventType returns the event type or empty string for a nil event.
@@ -174,6 +177,18 @@ func VerifyConfiguredWaffoPancakeWebhook(payload string, signatureHeader string)
 	if evt.Data.OrderMerchantExternalID != nil {
 		externalID = *evt.Data.OrderMerchantExternalID
 	}
+	refundExternalID := ""
+	if evt.Data.RefundTicketMerchantExternalID != nil {
+		refundExternalID = *evt.Data.RefundTicketMerchantExternalID
+	}
+	refundStatus := ""
+	if evt.Data.RefundStatus != nil {
+		refundStatus = *evt.Data.RefundStatus
+	}
+	refundReason := ""
+	if evt.Data.RefundReason != nil {
+		refundReason = *evt.Data.RefundReason
+	}
 	return &WaffoPancakeWebhookEvent{
 		ID:        evt.ID,
 		Timestamp: evt.Timestamp,
@@ -182,14 +197,17 @@ func VerifyConfiguredWaffoPancakeWebhook(payload string, signatureHeader string)
 		StoreID:   evt.StoreID,
 		Mode:      string(evt.Mode),
 		Data: WaffoPancakeWebhookData{
-			OrderID:                       evt.Data.OrderID,
-			OrderMerchantExternalID:       externalID,
-			BuyerEmail:                    evt.Data.BuyerEmail,
-			Currency:                      evt.Data.Currency,
-			Amount:                        evt.Data.Amount,
-			TaxAmount:                     evt.Data.TaxAmount,
-			ProductName:                   evt.Data.ProductName,
-			MerchantProvidedBuyerIdentity: identity,
+			OrderID:                        evt.Data.OrderID,
+			OrderMerchantExternalID:        externalID,
+			RefundTicketMerchantExternalID: refundExternalID,
+			BuyerEmail:                     evt.Data.BuyerEmail,
+			Currency:                       evt.Data.Currency,
+			Amount:                         evt.Data.Amount,
+			TaxAmount:                      evt.Data.TaxAmount,
+			ProductName:                    evt.Data.ProductName,
+			MerchantProvidedBuyerIdentity:  identity,
+			RefundStatus:                   refundStatus,
+			RefundReason:                   refundReason,
 		},
 	}, nil
 }

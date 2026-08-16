@@ -192,52 +192,58 @@ func StripeWebhook(c *gin.Context) {
 
 	callerIp := c.ClientIP()
 	logger.LogInfo(ctx, fmt.Sprintf("Stripe webhook 验签成功 event_type=%s client_ip=%s path=%q", string(event.Type), callerIp, c.Request.RequestURI))
+	var processingErr error
 	switch event.Type {
 	case stripe.EventTypeCheckoutSessionCompleted:
-		sessionCompleted(ctx, event, callerIp)
+		processingErr = sessionCompleted(ctx, event, callerIp)
 	case stripe.EventTypeCheckoutSessionExpired:
 		sessionExpired(ctx, event)
 	case stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded:
-		sessionAsyncPaymentSucceeded(ctx, event, callerIp)
+		processingErr = sessionAsyncPaymentSucceeded(ctx, event, callerIp)
 	case stripe.EventTypeCheckoutSessionAsyncPaymentFailed:
 		sessionAsyncPaymentFailed(ctx, event, callerIp)
 	case stripe.EventTypeChargeRefunded:
-		stripePaymentRefunded(ctx, event, callerIp)
+		processingErr = stripePaymentRefunded(ctx, event, callerIp)
 	case stripe.EventTypeChargeDisputeCreated:
-		stripeChargeDisputeCreated(ctx, event, callerIp)
+		processingErr = stripeChargeDisputeCreated(ctx, event, callerIp)
 	default:
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe webhook 忽略事件 event_type=%s client_ip=%s", string(event.Type), callerIp))
+	}
+	if processingErr != nil {
+		logger.LogError(ctx, fmt.Sprintf("Stripe webhook 持久化处理失败 event_type=%s client_ip=%s error=%q", string(event.Type), callerIp, processingErr.Error()))
+		c.Status(http.StatusInternalServerError)
+		return
 	}
 
 	c.Status(http.StatusOK)
 }
 
-func sessionCompleted(ctx context.Context, event stripe.Event, callerIp string) {
+func sessionCompleted(ctx context.Context, event stripe.Event, callerIp string) error {
 	customerId := event.GetObjectValue("customer")
 	referenceId := event.GetObjectValue("client_reference_id")
 	status := event.GetObjectValue("status")
 	if "complete" != status {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe checkout.completed 状态异常，忽略处理 trade_no=%s status=%s client_ip=%s", referenceId, status, callerIp))
-		return
+		return nil
 	}
 
 	paymentStatus := event.GetObjectValue("payment_status")
 	if paymentStatus != "paid" {
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe Checkout 支付未完成，等待异步结果 trade_no=%s payment_status=%s client_ip=%s", referenceId, paymentStatus, callerIp))
-		return
+		return nil
 	}
 
-	fulfillOrder(ctx, event, referenceId, customerId, callerIp)
+	return fulfillOrder(ctx, event, referenceId, customerId, callerIp)
 }
 
 // sessionAsyncPaymentSucceeded handles delayed payment methods (bank transfer, SEPA, etc.)
 // that confirm payment after the checkout session completes.
-func sessionAsyncPaymentSucceeded(ctx context.Context, event stripe.Event, callerIp string) {
+func sessionAsyncPaymentSucceeded(ctx context.Context, event stripe.Event, callerIp string) error {
 	customerId := event.GetObjectValue("customer")
 	referenceId := event.GetObjectValue("client_reference_id")
 	logger.LogInfo(ctx, fmt.Sprintf("Stripe 异步支付成功 trade_no=%s client_ip=%s", referenceId, callerIp))
 
-	fulfillOrder(ctx, event, referenceId, customerId, callerIp)
+	return fulfillOrder(ctx, event, referenceId, customerId, callerIp)
 }
 
 // sessionAsyncPaymentFailed marks orders as failed when delayed payment methods
@@ -278,7 +284,7 @@ func sessionAsyncPaymentFailed(ctx context.Context, event stripe.Event, callerIp
 	logger.LogInfo(ctx, fmt.Sprintf("Stripe 充值订单已标记为失败 trade_no=%s client_ip=%s", referenceId, callerIp))
 }
 
-func stripePaymentRefunded(ctx context.Context, event stripe.Event, callerIp string) {
+func stripePaymentRefunded(ctx context.Context, event stripe.Event, callerIp string) error {
 	referenceId := resolveStripeWebhookTradeNo(ctx, event)
 	refundId := firstNonEmptyString(
 		stripeObjectValue(event, "refunds", "data", "0", "id"),
@@ -287,26 +293,48 @@ func stripePaymentRefunded(ctx context.Context, event stripe.Event, callerIp str
 	)
 	if referenceId == "" {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe 退款事件缺少本地订单号 event_type=%s refund_id=%s client_ip=%s", string(event.Type), refundId, callerIp))
-		return
+		return errors.New("stripe refund is missing local trade number")
 	}
 
-	amountRefunded, _ := strconv.ParseInt(stripeObjectValue(event, "amount_refunded"), 10, 64)
-	amount, _ := strconv.ParseInt(stripeObjectValue(event, "amount"), 10, 64)
-	if amountRefunded > 0 && amount > 0 && amountRefunded < amount {
-		logger.LogWarn(ctx, fmt.Sprintf("Stripe 部分退款需人工核对推广返佣 trade_no=%s refund_id=%s amount_refunded=%d amount=%d client_ip=%s", referenceId, refundId, amountRefunded, amount, callerIp))
-		return
+	amountRefunded, refundErr := strconv.ParseInt(stripeObjectValue(event, "amount_refunded"), 10, 64)
+	amount, amountErr := strconv.ParseInt(stripeObjectValue(event, "amount"), 10, 64)
+	if refundErr != nil || amountErr != nil || amountRefunded <= 0 || amount <= 0 {
+		return fmt.Errorf("invalid stripe refund amounts: refunded=%q amount=%q", stripeObjectValue(event, "amount_refunded"), stripeObjectValue(event, "amount"))
 	}
-	reverseInvitationRebateByTradeNoFromWebhook(ctx, model.PaymentProviderStripe, referenceId, refundId, "stripe refund")
+	kind := model.PromotionRefundKindFull
+	if amountRefunded > 0 && amount > 0 && amountRefunded < amount {
+		kind = model.PromotionRefundKindPartial
+	}
+	return handlePromotionRefundFromWebhook(ctx, model.PromotionRefundInput{
+		Provider:            model.PaymentProviderStripe,
+		TradeNo:             referenceId,
+		RefundTradeNo:       refundId,
+		Kind:                kind,
+		PaidAmountMinor:     amount,
+		RefundedAmountMinor: amountRefunded,
+		Currency:            stripeObjectValue(event, "currency"),
+		Remark:              "stripe refund",
+	})
 }
 
-func stripeChargeDisputeCreated(ctx context.Context, event stripe.Event, callerIp string) {
+func stripeChargeDisputeCreated(ctx context.Context, event stripe.Event, callerIp string) error {
 	referenceId := resolveStripeWebhookTradeNo(ctx, event)
 	disputeId := firstNonEmptyString(stripeObjectValue(event, "id"), string(event.Type))
 	if referenceId == "" {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe 拒付事件缺少本地订单号 event_type=%s dispute_id=%s client_ip=%s", string(event.Type), disputeId, callerIp))
-		return
+		return errors.New("stripe dispute is missing local trade number")
 	}
-	reverseInvitationRebateByTradeNoFromWebhook(ctx, model.PaymentProviderStripe, referenceId, disputeId, "stripe dispute")
+	amount, _ := strconv.ParseInt(stripeObjectValue(event, "amount"), 10, 64)
+	return handlePromotionRefundFromWebhook(ctx, model.PromotionRefundInput{
+		Provider:            model.PaymentProviderStripe,
+		TradeNo:             referenceId,
+		RefundTradeNo:       disputeId,
+		Kind:                model.PromotionRefundKindDispute,
+		PaidAmountMinor:     amount,
+		RefundedAmountMinor: amount,
+		Currency:            stripeObjectValue(event, "currency"),
+		Remark:              "stripe dispute",
+	})
 }
 
 func resolveStripeWebhookTradeNo(ctx context.Context, event stripe.Event) string {
@@ -379,10 +407,10 @@ func resolveStripePaymentIntentTradeNo(ctx context.Context, paymentIntentId stri
 }
 
 // fulfillOrder is the shared logic for crediting quota after payment is confirmed.
-func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, customerId string, callerIp string) {
+func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, customerId string, callerIp string) error {
 	if len(referenceId) == 0 {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe 完成订单时缺少订单号 client_ip=%s", callerIp))
-		return
+		return errors.New("stripe payment is missing local trade number")
 	}
 
 	LockOrder(referenceId)
@@ -395,21 +423,32 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 	}
 	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, ""); err == nil {
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe 订阅订单处理成功 trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
-		return
+		return nil
 	} else if err != nil && !errors.Is(err, model.ErrSubscriptionOrderNotFound) {
 		logger.LogError(ctx, fmt.Sprintf("Stripe 订阅订单处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
-		return
+		return err
 	}
 
-	err := model.Recharge(referenceId, customerId, callerIp)
+	amountMinor, err := strconv.ParseInt(event.GetObjectValue("amount_total"), 10, 64)
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("Stripe 回调金额无效 trade_no=%s amount_total=%q event_type=%s error=%q", referenceId, event.GetObjectValue("amount_total"), string(event.Type), err.Error()))
+		return err
+	}
+	payment, err := model.NewVerifiedPaymentFromMinor(amountMinor, event.GetObjectValue("currency"))
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("Stripe 回调支付快照无效 trade_no=%s amount_total=%d currency=%q event_type=%s error=%q", referenceId, amountMinor, event.GetObjectValue("currency"), string(event.Type), err.Error()))
+		return err
+	}
+	err = model.RechargeStripe(referenceId, customerId, payment, callerIp)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("Stripe 充值处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
-		return
+		return err
 	}
 
 	total, _ := strconv.ParseFloat(event.GetObjectValue("amount_total"), 64)
 	currency := strings.ToUpper(event.GetObjectValue("currency"))
 	logger.LogInfo(ctx, fmt.Sprintf("Stripe 充值成功 trade_no=%s amount_total=%.2f currency=%s event_type=%s client_ip=%s", referenceId, total/100, currency, string(event.Type), callerIp))
+	return nil
 }
 
 func sessionExpired(ctx context.Context, event stripe.Event) {

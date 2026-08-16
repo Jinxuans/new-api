@@ -24,10 +24,26 @@ import {
   BILLING_SECTION_IDS,
 } from '@/features/system-settings/billing/section-registry.tsx'
 
+const migratedSections: Record<string, string> = {
+  checkin: 'reward-program',
+  growth: 'reward-program',
+  'growth-items': 'reward-program',
+  'growth-reviews': 'reward-program',
+  'growth-withdrawals': 'referral-program',
+}
+
 export const Route = createFileRoute(
   '/_authenticated/system-settings/billing/$section'
 )({
   beforeLoad: ({ params }) => {
+    const migratedSection = migratedSections[params.section]
+    if (migratedSection) {
+      throw redirect({
+        to: '/system-settings/billing/$section',
+        params: { section: migratedSection },
+      })
+    }
+
     const validSections = BILLING_SECTION_IDS as unknown as string[]
     if (!validSections.includes(params.section)) {
       throw redirect({
