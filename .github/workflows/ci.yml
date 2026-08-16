@@ -82,7 +82,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Typecheck
+        working-directory: web/default
         run: bun run typecheck
 
       - name: Test
-        run: bun test
+        working-directory: web/default
+        run: bun run test
