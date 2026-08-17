@@ -428,6 +428,7 @@ func handleWaffoPayment(c *gin.Context, wh *core.WebhookHandler, result *core.Pa
 		sendWaffoWebhookResponse(c, wh, false, "invalid payment amount")
 		return
 	}
+	payment.ProviderPaymentId = firstNonEmptyString(result.AcquiringOrderID, result.PaymentRequestID)
 
 	LockOrder(merchantOrderId)
 	defer UnlockOrder(merchantOrderId)

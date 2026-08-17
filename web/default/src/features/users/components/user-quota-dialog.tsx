@@ -16,20 +16,33 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+  FieldTitle,
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { createIdempotencyKey } from '@/lib/idempotency'
 
 import { adjustUserQuota } from '../api'
 import type { QuotaAdjustMode } from '../types'
+
+const MIN_QUOTA = -2_147_483_648
+const MAX_QUOTA_EXCLUSIVE = 2_147_483_647
+const MAX_REMARK_LENGTH = 1000
 
 interface UserQuotaDialogProps {
   open: boolean
@@ -39,70 +52,140 @@ interface UserQuotaDialogProps {
   onSuccess: () => void
 }
 
+type IdempotencyRequest = {
+  signature: string
+  key: string
+}
+
 export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const { t } = useTranslation()
   const [mode, setMode] = useState<QuotaAdjustMode>('add')
   const [amount, setAmount] = useState('')
+  const [remark, setRemark] = useState('')
   const [loading, setLoading] = useState(false)
+  const idempotencyRequestRef = useRef<IdempotencyRequest | null>(null)
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
 
-  const amountValue = parseFloat(amount) || 0
-  const quotaValue = parseQuotaFromDollars(Math.abs(amountValue))
+  const normalizedAmount = amount.trim()
+  const amountValue = Number(normalizedAmount)
+  const hasFiniteAmount =
+    normalizedAmount !== '' && Number.isFinite(amountValue)
+  const quotaValue = hasFiniteAmount
+    ? parseQuotaFromDollars(
+        mode === 'override' ? amountValue : Math.abs(amountValue)
+      )
+    : 0
+  let resultingQuota = props.currentQuota
+  if (mode === 'add') resultingQuota += quotaValue
+  if (mode === 'subtract') resultingQuota -= quotaValue
+  if (mode === 'override') resultingQuota = quotaValue
 
-  const getPreviewText = () => {
-    const current = props.currentQuota
-    const val = quotaValue
-    switch (mode) {
-      case 'add':
-        return `${t('Current quota')}: ${formatQuota(current)}  +${formatQuota(val)} = ${formatQuota(current + val)}`
-      case 'subtract':
-        return `${t('Current quota')}: ${formatQuota(current)}  -${formatQuota(val)} = ${formatQuota(current - val)}`
-      case 'override': {
-        const overrideQuota = parseQuotaFromDollars(amountValue)
-        return `${t('Current quota')}: ${formatQuota(current)} → ${formatQuota(overrideQuota)}`
-      }
-      default:
-        return ''
+  const amountHasValidSign =
+    mode === 'override' ? amountValue >= 0 : amountValue > 0
+  const quotaIsSupported =
+    Number.isSafeInteger(quotaValue) &&
+    quotaValue >= (mode === 'override' ? 0 : 1) &&
+    quotaValue < MAX_QUOTA_EXCLUSIVE
+  const resultingQuotaIsSupported =
+    Number.isSafeInteger(resultingQuota) &&
+    resultingQuota >= MIN_QUOTA &&
+    resultingQuota < MAX_QUOTA_EXCLUSIVE &&
+    resultingQuota !== props.currentQuota
+  const amountIsValid =
+    hasFiniteAmount &&
+    amountHasValidSign &&
+    (!tokensOnly || Number.isInteger(amountValue)) &&
+    quotaIsSupported &&
+    resultingQuotaIsSupported
+  const normalizedRemark = remark.trim()
+  const remarkIsValid =
+    normalizedRemark !== '' && remark.length <= MAX_REMARK_LENGTH
+  const formIsValid = amountIsValid && remarkIsValid
+
+  let amountErrorKey = ''
+  if (normalizedAmount !== '' && !amountIsValid) {
+    if (tokensOnly && hasFiniteAmount && !Number.isInteger(amountValue)) {
+      amountErrorKey = 'Amount must be a whole number'
+    } else if (
+      hasFiniteAmount &&
+      amountHasValidSign &&
+      resultingQuota === props.currentQuota
+    ) {
+      amountErrorKey = 'Enter an amount that changes the current quota.'
+    } else if (hasFiniteAmount && amountHasValidSign) {
+      amountErrorKey = 'The resulting quota is outside the supported range.'
+    } else {
+      amountErrorKey = 'Enter a valid amount.'
     }
   }
 
-  const handleConfirm = async () => {
-    if (!amount && mode !== 'override') return
-    if (quotaValue <= 0 && mode !== 'override') return
+  let previewText = `${t('Current quota')}: ${formatQuota(props.currentQuota)}`
+  if (hasFiniteAmount && Number.isSafeInteger(quotaValue)) {
+    if (mode === 'add') {
+      previewText += `  +${formatQuota(quotaValue)} = ${formatQuota(resultingQuota)}`
+    } else if (mode === 'subtract') {
+      previewText += `  -${formatQuota(quotaValue)} = ${formatQuota(resultingQuota)}`
+    } else {
+      previewText += ` → ${formatQuota(resultingQuota)}`
+    }
+  }
+
+  const resetForm = () => {
+    setAmount('')
+    setRemark('')
+    setMode('add')
+    idempotencyRequestRef.current = null
+  }
+
+  const handleOpenChange = (open: boolean) => {
+    if (!open) resetForm()
+    props.onOpenChange(open)
+  }
+
+  const handleConfirm = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!formIsValid || loading) return
+
+    const signature = JSON.stringify([
+      props.userId,
+      mode,
+      quotaValue,
+      normalizedRemark,
+    ])
+    if (idempotencyRequestRef.current?.signature !== signature) {
+      idempotencyRequestRef.current = {
+        signature,
+        key: createIdempotencyKey(`admin-quota-${props.userId}`),
+      }
+    }
 
     setLoading(true)
     try {
-      const value =
-        mode === 'override' ? parseQuotaFromDollars(amountValue) : quotaValue
       const result = await adjustUserQuota({
         id: props.userId,
         action: 'add_quota',
         mode,
-        value: mode === 'override' ? value : Math.abs(value),
+        value: quotaValue,
+        remark: normalizedRemark,
+        idempotency_key: idempotencyRequestRef.current.key,
       })
       if (result.success) {
         toast.success(t('Quota adjusted successfully'))
-        setAmount('')
-        setMode('add')
-        props.onOpenChange(false)
+        handleOpenChange(false)
         props.onSuccess()
       } else {
         toast.error(result.message || t('Failed to adjust quota'))
       }
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : t('Failed to adjust quota'))
+    } catch (error: unknown) {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to adjust quota')
+      )
     } finally {
       setLoading(false)
     }
-  }
-
-  const handleCancel = () => {
-    setAmount('')
-    setMode('add')
-    props.onOpenChange(false)
   }
 
   const placeholder = tokensOnly
@@ -112,70 +195,124 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   return (
     <Dialog
       open={props.open}
-      onOpenChange={props.onOpenChange}
+      onOpenChange={handleOpenChange}
       title={t('Adjust Quota')}
       description={t('Select an operation mode and enter the amount')}
       contentHeight='auto'
-      bodyClassName='space-y-4'
       footer={
         <>
-          <Button variant='outline' onClick={handleCancel}>
+          <Button
+            type='button'
+            variant='outline'
+            onClick={() => handleOpenChange(false)}
+            disabled={loading}
+          >
             {t('Cancel')}
           </Button>
-          <Button onClick={handleConfirm} disabled={loading}>
+          <Button
+            type='submit'
+            form='user-quota-adjustment-form'
+            disabled={loading || !formIsValid}
+          >
             {loading ? t('Processing...') : t('Confirm')}
           </Button>
         </>
       }
     >
-      <div className='space-y-4'>
-        <div className='text-muted-foreground text-sm'>{getPreviewText()}</div>
+      <form id='user-quota-adjustment-form' onSubmit={handleConfirm} noValidate>
+        <FieldGroup>
+          <div className='text-muted-foreground text-sm'>{previewText}</div>
 
-        <div className='space-y-2'>
-          <Label>{t('Mode')}</Label>
-          <div className='flex gap-1'>
-            {(['add', 'subtract', 'override'] as const).map((m) => (
-              <Button
-                key={m}
-                type='button'
-                variant='outline'
-                size='sm'
-                className={cn(
-                  mode === m &&
-                    'bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
-                )}
-                onClick={() => {
-                  setMode(m)
-                  setAmount('')
-                }}
+          <Field>
+            <FieldTitle id='quota-adjustment-mode-label'>
+              {t('Mode')}
+            </FieldTitle>
+            <ToggleGroup
+              aria-labelledby='quota-adjustment-mode-label'
+              value={[mode]}
+              variant='outline'
+              size='sm'
+              spacing={1}
+              onValueChange={(values) => {
+                const nextMode = values.find((value) => value !== mode) as
+                  | QuotaAdjustMode
+                  | undefined
+                if (!nextMode) return
+                setMode(nextMode)
+                setAmount('')
+                idempotencyRequestRef.current = null
+              }}
+            >
+              <ToggleGroupItem value='add' disabled={loading}>
+                {t('Add')}
+              </ToggleGroupItem>
+              <ToggleGroupItem value='subtract' disabled={loading}>
+                {t('Subtract')}
+              </ToggleGroupItem>
+              <ToggleGroupItem value='override' disabled={loading}>
+                {t('Override')}
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </Field>
+
+          <Field data-invalid={Boolean(amountErrorKey) || undefined}>
+            <FieldLabel htmlFor='quota-adjustment-amount'>
+              {t('Amount')} ({currencyLabel})
+            </FieldLabel>
+            <Input
+              id='quota-adjustment-amount'
+              type='number'
+              step={tokensOnly ? 1 : 0.000001}
+              min={0}
+              placeholder={placeholder}
+              value={amount}
+              aria-invalid={Boolean(amountErrorKey) || undefined}
+              disabled={loading}
+              required
+              onChange={(event) => {
+                setAmount(event.target.value)
+                idempotencyRequestRef.current = null
+              }}
+            />
+            {amountErrorKey ? (
+              <FieldError>{t(amountErrorKey)}</FieldError>
+            ) : null}
+          </Field>
+
+          <Field data-invalid={(remark !== '' && !remarkIsValid) || undefined}>
+            <div className='flex items-center gap-2'>
+              <FieldLabel htmlFor='quota-adjustment-reason'>
+                {t('Reason')}
+              </FieldLabel>
+              <span
+                className='text-muted-foreground text-sm'
+                aria-hidden='true'
               >
-                {m === 'add'
-                  ? t('Add')
-                  : m === 'subtract'
-                    ? t('Subtract')
-                    : t('Override')}
-              </Button>
-            ))}
-          </div>
-        </div>
-
-        <div className='space-y-2'>
-          <Label>
-            {t('Amount')} ({currencyLabel})
-          </Label>
-          <Input
-            type='number'
-            step={tokensOnly ? 1 : 0.000001}
-            min={mode === 'override' ? undefined : 0}
-            placeholder={placeholder}
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleConfirm()
-            }}
-          />
-        </div>
-      </div>
+                {t('Required')}
+              </span>
+            </div>
+            <Textarea
+              id='quota-adjustment-reason'
+              value={remark}
+              maxLength={MAX_REMARK_LENGTH}
+              className='min-h-24'
+              aria-invalid={(remark !== '' && !remarkIsValid) || undefined}
+              disabled={loading}
+              required
+              onChange={(event) => {
+                setRemark(event.target.value)
+                idempotencyRequestRef.current = null
+              }}
+            />
+            <FieldDescription>
+              {t('Explain the evidence and decision for the audit record.')}
+            </FieldDescription>
+            {remark !== '' && !remarkIsValid ? (
+              <FieldError>{t('Reason is required.')}</FieldError>
+            ) : null}
+          </Field>
+        </FieldGroup>
+      </form>
     </Dialog>
   )
 }

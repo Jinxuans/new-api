@@ -87,7 +87,14 @@ func setupRegisterControllerTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	model.DB = db
 	model.LOG_DB = db
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Log{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.User{},
+		&model.Log{},
+		&model.InvitationReward{},
+		&model.PromotionEvent{},
+		&model.PromotionFundTransaction{},
+		&model.PromotionFundTransactionLeg{},
+	))
 
 	t.Cleanup(func() {
 		sqlDB, err := db.DB()

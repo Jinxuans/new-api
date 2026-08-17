@@ -165,6 +165,8 @@ func SetApiRouter(router *gin.Engine) {
 			growthRoute.POST("/tasks/:code/claim", middleware.TurnstileCheck(), controller.ClaimGrowthRewardItem)
 			growthRoute.GET("/rewards", controller.GetGrowthRewards)
 			growthRoute.GET("/events", controller.GetPromotionEvents)
+			growthRoute.GET("/fund-records", controller.GetPromotionFundRecords)
+			growthRoute.GET("/refund-recovery", controller.GetPromotionRefundRecovery)
 			growthRoute.POST("/submissions", controller.CreateGrowthSubmission)
 			growthRoute.GET("/submissions", controller.GetGrowthSubmissions)
 			growthRoute.GET("/commissions", controller.GetPromotionCommissionLedgers)
@@ -172,12 +174,18 @@ func SetApiRouter(router *gin.Engine) {
 			growthRoute.POST("/commissions/transfer", controller.TransferPromotionCommissionsToQuota)
 			growthRoute.POST("/withdrawals", controller.CreatePromotionWithdrawal)
 			growthRoute.GET("/withdrawals", controller.GetPromotionWithdrawals)
+			growthRoute.GET("/withdrawals/:id", controller.GetPromotionWithdrawal)
 		}
 		growthAdminConfigRoute := apiRouter.Group("/growth/admin/config")
 		growthAdminConfigRoute.Use(middleware.RootAuth())
 		{
 			growthAdminConfigRoute.GET("", controller.AdminGetGrowthConfig)
 			growthAdminConfigRoute.PUT("", controller.AdminUpdateGrowthConfig)
+		}
+		growthRootOperationsRoute := apiRouter.Group("/growth/admin")
+		growthRootOperationsRoute.Use(middleware.RootAuth())
+		{
+			growthRootOperationsRoute.POST("/refund-cases", controller.AdminCreatePromotionRefundCase)
 		}
 		growthAdminRoute := apiRouter.Group("/growth/admin")
 		growthAdminRoute.Use(middleware.AdminAuth())
@@ -189,15 +197,19 @@ func SetApiRouter(router *gin.Engine) {
 			growthAdminRoute.POST("/tasks", controller.AdminCreateGrowthRewardItem)
 			growthAdminRoute.PUT("/tasks/:id", controller.AdminUpdateGrowthRewardItem)
 			growthAdminRoute.GET("/rewards", controller.AdminGetGrowthRewards)
+			growthAdminRoute.GET("/fund-records", controller.AdminGetPromotionFundRecords)
 			growthAdminRoute.GET("/submissions", controller.AdminGetGrowthSubmissions)
 			growthAdminRoute.POST("/submissions/:id/approve", controller.AdminApproveGrowthSubmission)
 			growthAdminRoute.POST("/submissions/:id/reject", controller.AdminRejectGrowthSubmission)
 			growthAdminRoute.GET("/withdrawals", controller.AdminGetPromotionWithdrawals)
+			growthAdminRoute.GET("/withdrawals/:id", controller.AdminGetPromotionWithdrawal)
 			growthAdminRoute.POST("/withdrawals/:id/approve", controller.AdminApprovePromotionWithdrawal)
 			growthAdminRoute.POST("/withdrawals/:id/reject", controller.AdminRejectPromotionWithdrawal)
+			growthAdminRoute.POST("/withdrawals/:id/initiate", controller.AdminInitiatePromotionWithdrawalPayout)
 			growthAdminRoute.POST("/withdrawals/:id/paid", controller.AdminMarkPromotionWithdrawalPaid)
+			growthAdminRoute.POST("/withdrawals/:id/failed", controller.AdminMarkPromotionWithdrawalFailed)
 			growthAdminRoute.GET("/refund-cases", controller.AdminGetPromotionRefundCases)
-			growthAdminRoute.POST("/refund-cases/:id/resolve", controller.AdminResolvePromotionRefundCase)
+			growthAdminRoute.POST("/refund-cases/:id/actions", controller.AdminApplyPromotionRefundAction)
 			growthAdminRoute.GET("/stats", controller.AdminGetGrowthStats)
 		}
 

@@ -24,6 +24,7 @@ import {
   FlaskConical,
   Gift,
   Key,
+  Landmark,
   LayoutDashboard,
   ListTodo,
   MessageSquare,
@@ -159,6 +160,12 @@ export function useSidebarData(): SidebarData {
             icon: CreditCard,
           },
           {
+            title: t('Funds Operations'),
+            url: '/funds-operations',
+            icon: Landmark,
+            requiredRole: ROLE.ADMIN,
+          },
+          {
             title: t('System Info'),
             url: '/system-info',
             icon: ServerCog,
@@ -169,6 +176,7 @@ export function useSidebarData(): SidebarData {
             url: '/system-settings/site',
             activeUrls: ['/system-settings'],
             icon: Settings,
+            requiredRole: ROLE.SUPER_ADMIN,
           },
         ],
       },

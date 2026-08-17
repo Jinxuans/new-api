@@ -19,6 +19,7 @@ func resetGrowthAdminTestData(t *testing.T) {
 		"growth_submissions",
 		"growth_reward_items",
 		"promotion_withdrawals",
+		"top_ups",
 		"users",
 	}
 	for _, table := range tables {
@@ -29,6 +30,29 @@ func resetGrowthAdminTestData(t *testing.T) {
 			require.NoError(t, model.DB.Exec("DELETE FROM "+table).Error)
 		}
 	})
+}
+
+func TestFirstTopUpTaskIgnoresSubscriptionCompatibilityRows(t *testing.T) {
+	resetGrowthAdminTestData(t)
+	user := &model.User{Id: 1881, Username: "first_topup_task", Status: common.UserStatusEnabled}
+	require.NoError(t, model.DB.Create(user).Error)
+	item := &model.GrowthRewardItem{Code: model.GrowthRewardItemFirstTopUp}
+	require.NoError(t, model.DB.Create(&model.TopUp{
+		UserId: user.Id, Purpose: model.TopUpPurposeSubscription,
+		TradeNo: "task-subscription-topup", Status: common.TopUpStatusSuccess,
+	}).Error)
+
+	eligible, _, err := canClaimAutoRewardItem(user.Id, item)
+	require.NoError(t, err)
+	assert.False(t, eligible)
+
+	require.NoError(t, model.DB.Create(&model.TopUp{
+		UserId: user.Id, Purpose: model.TopUpPurposeAPIBalance,
+		TradeNo: "task-api-topup", Status: common.TopUpStatusSuccess,
+	}).Error)
+	eligible, _, err = canClaimAutoRewardItem(user.Id, item)
+	require.NoError(t, err)
+	assert.True(t, eligible)
 }
 
 func TestListAdminGrowthRewardItemsReturnsEffectiveRulesAndCapabilities(t *testing.T) {
@@ -95,6 +119,17 @@ func TestUpdateAdminGrowthRewardItemKeepsBuiltInIdentityAndValidatesFields(t *te
 		ActionURL:   "https://example.com/community",
 		Enabled:     true,
 	})
+	require.Error(t, err)
+
+	claimPassword := "community-2026"
+	updated, err = UpdateAdminGrowthRewardItem(item.Id, AdminGrowthRewardItemUpdateRequest{
+		Title:         "Join us",
+		Description:   "Community task",
+		RewardQuota:   100,
+		ActionURL:     "https://example.com/community",
+		ClaimPassword: &claimPassword,
+		Enabled:       true,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, model.GrowthRewardItemJoinCommunity, updated.Code)
 	assert.Equal(t, model.GrowthRewardItemTypeAuto, updated.ItemType)
@@ -103,6 +138,21 @@ func TestUpdateAdminGrowthRewardItemKeepsBuiltInIdentityAndValidatesFields(t *te
 	require.NoError(t, model.DB.Where("id = ?", item.Id).First(&stored).Error)
 	assert.Equal(t, model.GrowthRewardItemJoinCommunity, stored.Code)
 	assert.Equal(t, model.GrowthRewardItemTypeAuto, stored.ItemType)
+}
+
+func TestJoinCommunityRewardIsUnavailableWithoutClaimPassword(t *testing.T) {
+	item := &model.GrowthRewardItem{
+		Code:     model.GrowthRewardItemJoinCommunity,
+		Enabled:  true,
+		ItemType: model.GrowthRewardItemTypeAuto,
+	}
+	assert.True(t, shouldHideGrowthRewardItem(item, &operation_setting.GrowthSetting{Enabled: true}))
+	require.Error(t, validateGrowthRewardClaimPassword(item, ""))
+
+	item.ClaimPassword = "community-2026"
+	assert.False(t, shouldHideGrowthRewardItem(item, &operation_setting.GrowthSetting{Enabled: true}))
+	require.Error(t, validateGrowthRewardClaimPassword(item, "wrong"))
+	require.NoError(t, validateGrowthRewardClaimPassword(item, "community-2026"))
 }
 
 func TestCreateAdminGrowthRewardItemOnlyAllowsSubmissionTypes(t *testing.T) {
@@ -183,6 +233,7 @@ func TestListAdminPromotionWithdrawalsFiltersStatus(t *testing.T) {
 	require.NoError(t, model.DB.Create([]*model.PromotionWithdrawal{
 		{UserId: 1, NetAmountCents: 1000, Status: model.PromotionWithdrawalStatusPendingReview},
 		{UserId: 2, NetAmountCents: 2000, Status: model.PromotionWithdrawalStatusApproved},
+		{UserId: 3, NetAmountCents: 3000, Status: model.PromotionWithdrawalStatusProcessing},
 	}).Error)
 
 	rows, total, err := ListAdminPromotionWithdrawals(
@@ -193,10 +244,20 @@ func TestListAdminPromotionWithdrawalsFiltersStatus(t *testing.T) {
 	assert.Equal(t, int64(1), total)
 	require.Len(t, rows, 1)
 	assert.Equal(t, 2, rows[0].UserId)
+
+	rows, total, err = ListAdminPromotionWithdrawals(
+		&common.PageInfo{Page: 1, PageSize: 20},
+		model.PromotionWithdrawalStatusProcessing,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 3, rows[0].UserId)
 }
 
 func TestApproveGrowthSubmissionRejectsRewardWhenConfiguredMaximumIsZero(t *testing.T) {
 	resetGrowthAdminTestData(t)
+	seedFinancialActor(t, 1, common.RoleAdminUser)
 	seedUser(t, 7001, 100)
 	withGrowthSetting(t, func(setting *operation_setting.GrowthSetting) {
 		setting.SubmissionMinRewardQuota = 0

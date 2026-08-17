@@ -20,14 +20,36 @@ type rejectGrowthSubmissionRequest struct {
 }
 
 type promotionWithdrawalRequest struct {
-	PayoutMethod  string `json:"payout_method"`
-	PayoutAccount string `json:"payout_account"`
-	Remark        string `json:"remark"`
+	PayoutMethod            string `json:"payout_method"`
+	PayoutAccount           string `json:"payout_account"`
+	Remark                  string `json:"remark"`
+	ExpectedAmountCents     int64  `json:"expected_amount_cents" binding:"required,min=1"`
+	ExpectedQuotaEquivalent int64  `json:"expected_quota_equivalent" binding:"min=1"`
+}
+
+type promotionCommissionBalanceRequest struct {
+	ExpectedAmountCents     int64 `json:"expected_amount_cents" binding:"required,min=1"`
+	ExpectedQuotaEquivalent int64 `json:"expected_quota_equivalent" binding:"required,min=1"`
 }
 
 type promotionWithdrawalReviewRequest struct {
 	TradeNo    string `json:"trade_no"`
 	ReviewNote string `json:"review_note"`
+}
+
+type promotionWithdrawalPayoutInitiateRequest struct {
+	TradeNo    string `json:"trade_no" binding:"required"`
+	ReviewNote string `json:"review_note"`
+}
+
+type promotionWithdrawalPaidRequest struct {
+	TradeNo    string `json:"trade_no"`
+	ReviewNote string `json:"review_note"`
+}
+
+type promotionWithdrawalFailedRequest struct {
+	TradeNo     string `json:"trade_no" binding:"required"`
+	FailureNote string `json:"failure_note" binding:"required"`
 }
 
 func AdminGetGrowthConfig(c *gin.Context) {
@@ -73,7 +95,7 @@ func GetGrowthRewardItems(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, items)
+	common.ApiSuccess(c, service.ToUserGrowthRewardItems(items))
 }
 
 func ClaimGrowthRewardItem(c *gin.Context) {
@@ -89,12 +111,12 @@ func ClaimGrowthRewardItem(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, reward)
+	common.ApiSuccess(c, service.ToUserGrowthReward(reward))
 }
 
 func GetGrowthRewards(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	rewards, total, err := service.ListGrowthRewards(c.GetInt("id"), pageInfo)
+	rewards, total, err := service.ListUserGrowthRewards(c.GetInt("id"), pageInfo)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -116,6 +138,18 @@ func GetPromotionEvents(c *gin.Context) {
 	common.ApiSuccess(c, pageInfo)
 }
 
+func GetPromotionFundRecords(c *gin.Context) {
+	pageInfo := common.GetPageQuery(c)
+	records, total, err := service.ListPromotionFundRecords(c.GetInt("id"), pageInfo)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(records)
+	common.ApiSuccess(c, pageInfo)
+}
+
 func CreateGrowthSubmission(c *gin.Context) {
 	var req service.GrowthSubmissionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -127,12 +161,12 @@ func CreateGrowthSubmission(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, submission)
+	common.ApiSuccess(c, service.ToUserGrowthSubmission(submission))
 }
 
 func GetGrowthSubmissions(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	submissions, total, err := service.ListGrowthSubmissions(c.GetInt("id"), pageInfo)
+	submissions, total, err := service.ListUserGrowthSubmissions(c.GetInt("id"), pageInfo)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -155,7 +189,15 @@ func GetPromotionCommissionLedgers(c *gin.Context) {
 }
 
 func TransferPromotionCommissionsToQuota(c *gin.Context) {
-	quota, err := service.TransferAllSettledPromotionCommissionsToQuota(c.GetInt("id"))
+	var req promotionCommissionBalanceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	quota, err := service.TransferAllSettledPromotionCommissionsToQuota(c.GetInt("id"), service.PromotionCommissionBalanceExpectation{
+		AmountCents:     req.ExpectedAmountCents,
+		QuotaEquivalent: req.ExpectedQuotaEquivalent,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -170,15 +212,17 @@ func CreatePromotionWithdrawal(c *gin.Context) {
 		return
 	}
 	withdrawal, err := service.CreatePromotionWithdrawal(c.GetInt("id"), service.PromotionWithdrawalRequest{
-		PayoutMethod:  req.PayoutMethod,
-		PayoutAccount: req.PayoutAccount,
-		Remark:        req.Remark,
+		PayoutMethod:            req.PayoutMethod,
+		PayoutAccount:           req.PayoutAccount,
+		Remark:                  req.Remark,
+		ExpectedAmountCents:     req.ExpectedAmountCents,
+		ExpectedQuotaEquivalent: req.ExpectedQuotaEquivalent,
 	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, withdrawal)
+	common.ApiSuccess(c, service.ToUserPromotionWithdrawal(withdrawal))
 }
 
 func GetPromotionWithdrawals(c *gin.Context) {
@@ -191,6 +235,20 @@ func GetPromotionWithdrawals(c *gin.Context) {
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(withdrawals)
 	common.ApiSuccess(c, pageInfo)
+}
+
+func GetPromotionWithdrawal(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	withdrawal, err := service.GetPromotionWithdrawal(c.GetInt("id"), id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, withdrawal)
 }
 
 func AdminGetGrowthRewardItems(c *gin.Context) {
@@ -271,6 +329,37 @@ func AdminGetPromotionWithdrawals(c *gin.Context) {
 	common.ApiSuccess(c, pageInfo)
 }
 
+func AdminGetPromotionFundRecords(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Query("user_id"))
+	if err != nil || userId <= 0 {
+		common.ApiError(c, errors.New("valid user_id is required"))
+		return
+	}
+	pageInfo := common.GetPageQuery(c)
+	records, total, err := service.ListAdminPromotionFundRecords(userId, pageInfo)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(records)
+	common.ApiSuccess(c, pageInfo)
+}
+
+func AdminGetPromotionWithdrawal(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	withdrawal, err := service.GetAdminPromotionWithdrawal(id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, withdrawal)
+}
+
 func AdminApprovePromotionWithdrawal(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -314,13 +403,35 @@ func AdminRejectPromotionWithdrawal(c *gin.Context) {
 	common.ApiSuccess(c, withdrawal)
 }
 
+func AdminInitiatePromotionWithdrawalPayout(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	var req promotionWithdrawalPayoutInitiateRequest
+	if err = c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	withdrawal, err := service.AdminInitiatePromotionWithdrawalPayout(id, c.GetInt("id"), service.PromotionWithdrawalReviewRequest{
+		TradeNo:    req.TradeNo,
+		ReviewNote: req.ReviewNote,
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, withdrawal)
+}
+
 func AdminMarkPromotionWithdrawalPaid(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	var req promotionWithdrawalReviewRequest
+	var req promotionWithdrawalPaidRequest
 	if err = c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
@@ -328,6 +439,28 @@ func AdminMarkPromotionWithdrawalPaid(c *gin.Context) {
 	withdrawal, err := service.AdminMarkPromotionWithdrawalPaid(id, c.GetInt("id"), service.PromotionWithdrawalReviewRequest{
 		TradeNo:    req.TradeNo,
 		ReviewNote: req.ReviewNote,
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, withdrawal)
+}
+
+func AdminMarkPromotionWithdrawalFailed(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	var req promotionWithdrawalFailedRequest
+	if err = c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	withdrawal, err := service.AdminMarkPromotionWithdrawalFailed(id, c.GetInt("id"), service.PromotionWithdrawalReviewRequest{
+		TradeNo:     req.TradeNo,
+		FailureNote: req.FailureNote,
 	})
 	if err != nil {
 		common.ApiError(c, err)

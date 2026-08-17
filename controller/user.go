@@ -1137,10 +1137,12 @@ func updateAdminPermissionsForUserInTx(c *gin.Context, tx *gorm.DB, userID int, 
 }
 
 type ManageRequest struct {
-	Id     int    `json:"id"`
-	Action string `json:"action"`
-	Value  int    `json:"value"`
-	Mode   string `json:"mode"`
+	Id             int    `json:"id"`
+	Action         string `json:"action"`
+	Value          int    `json:"value"`
+	Mode           string `json:"mode"`
+	Remark         string `json:"remark"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // ManageUser Only admin user can do this
@@ -1223,48 +1225,62 @@ func ManageUser(c *gin.Context) {
 		}
 		user.Role = common.RoleCommonUser
 	case "add_quota":
-		switch req.Mode {
-		case "add":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_add", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
-		case "subtract":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.DecreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_subtract", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
-		case "override":
-			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_override", map[string]interface{}{
-				"from": logger.LogQuota(oldQuota),
-				"to":   logger.LogQuota(req.Value),
-			})
-		default:
+		if req.Mode != model.AdminQuotaAdjustmentModeOverride && req.Value <= 0 {
+			common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+			return
+		}
+		if strings.TrimSpace(req.Remark) == "" {
+			common.ApiErrorI18n(c, i18n.MsgUserQuotaAdjustmentReasonRequired)
+			return
+		}
+		if strings.TrimSpace(req.IdempotencyKey) == "" {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
+		}
+		result, err := model.AdjustUserQuotaByAdmin(model.AdminQuotaAdjustmentInput{
+			UserId: user.Id, Mode: req.Mode, Value: req.Value,
+			ActorId: c.GetInt("id"), ActorRef: c.GetString("username"),
+			Remark: req.Remark, IdempotencyKey: req.IdempotencyKey,
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, model.ErrAdminQuotaAdjustmentInvalid):
+				common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			case errors.Is(err, model.ErrAdminQuotaAdjustmentReasonRequired):
+				common.ApiErrorI18n(c, i18n.MsgUserQuotaAdjustmentReasonRequired)
+			case errors.Is(err, model.ErrAdminQuotaAdjustmentOutOfRange):
+				common.ApiErrorI18n(c, i18n.MsgUserQuotaOutOfRange)
+			case errors.Is(err, model.ErrAdminQuotaAdjustmentNoChange):
+				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+			case errors.Is(err, model.ErrUserRefundHeld):
+				common.ApiErrorI18n(c, i18n.MsgAuthRefundHold)
+			default:
+				common.ApiError(c, err)
+			}
+			return
+		}
+		auditAction := "user.quota_override"
+		if req.Mode == model.AdminQuotaAdjustmentModeAdd {
+			auditAction = "user.quota_add"
+		} else if req.Mode == model.AdminQuotaAdjustmentModeSubtract {
+			auditAction = "user.quota_subtract"
+		} else if req.Mode != model.AdminQuotaAdjustmentModeOverride {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
+		if !result.Replayed {
+			recordManageAuditFor(c, user.Id, auditAction, map[string]interface{}{
+				"quota":               logger.LogQuota(req.Value),
+				"from":                logger.LogQuota(result.PreviousQuota),
+				"to":                  logger.LogQuota(result.CurrentQuota),
+				"reason":              strings.TrimSpace(req.Remark),
+				"fund_transaction_id": result.FundTransactionId,
+			})
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "",
+			"data":    result,
 		})
 		return
 	default:

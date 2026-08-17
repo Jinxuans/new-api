@@ -28,6 +28,7 @@ import type {
   UserFormData,
   ManageUserAction,
   ManageUserQuotaPayload,
+  UserQuotaAdjustmentResult,
   ApiResponse,
 } from './types'
 
@@ -134,7 +135,7 @@ export async function manageUser(
  */
 export async function adjustUserQuota(
   payload: ManageUserQuotaPayload
-): Promise<ApiResponse<Partial<User>>> {
+): Promise<ApiResponse<UserQuotaAdjustmentResult>> {
   const res = await api.post('/api/user/manage', payload)
   return res.data
 }

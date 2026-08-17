@@ -8,12 +8,14 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
 	InvitationRewardTypeRegister     = "register"
 	InvitationRewardTypeFirstRequest = "first_request"
 	InvitationRewardTypeFirstTopUp   = "first_topup"
+	InvitationRewardStatusPending    = "pending"
 	InvitationRewardStatusSettled    = "settled"
 	InvitationRewardStatusReversed   = "reversed"
 )
@@ -21,34 +23,30 @@ const (
 var ErrInvitationRewardQuotaLimitExceeded = errors.New("invitation reward quota limit exceeded")
 
 type InvitationReward struct {
-	Id             int    `json:"id"`
-	InviterId      int    `json:"inviter_id" gorm:"index"`
-	InviteeId      int    `json:"invitee_id" gorm:"index:idx_invitation_reward_invitee_type,unique"`
-	RewardType     string `json:"reward_type" gorm:"type:varchar(32);index:idx_invitation_reward_invitee_type,unique"`
-	RewardQuota    int    `json:"reward_quota"`
-	TriggerAt      int64  `json:"trigger_at" gorm:"index"`
-	TriggerTopUpId int    `json:"trigger_top_up_id" gorm:"index"`
-	TriggerTradeNo string `json:"trigger_trade_no" gorm:"type:varchar(255);index"`
-	RuleSnapshot   string `json:"rule_snapshot" gorm:"type:text"`
-	Remark         string `json:"remark" gorm:"type:text"`
-	Status         string `json:"status" gorm:"type:varchar(32);index"`
-	CreatedAt      int64  `json:"created_at" gorm:"index"`
-	SettledAt      int64  `json:"settled_at" gorm:"index"`
+	Id               int    `json:"id"`
+	InviterId        int    `json:"inviter_id" gorm:"index"`
+	InviteeId        int    `json:"invitee_id" gorm:"index:idx_invitation_reward_invitee_type,unique"`
+	RewardType       string `json:"reward_type" gorm:"type:varchar(32);index:idx_invitation_reward_invitee_type,unique"`
+	RewardQuota      int    `json:"reward_quota"`
+	TransferredQuota int    `json:"transferred_quota"`
+	TriggerAt        int64  `json:"trigger_at" gorm:"index"`
+	TriggerTopUpId   int    `json:"trigger_top_up_id" gorm:"index"`
+	TriggerTradeNo   string `json:"trigger_trade_no" gorm:"type:varchar(255);index"`
+	RuleSnapshot     string `json:"rule_snapshot" gorm:"type:text"`
+	Remark           string `json:"remark" gorm:"type:text"`
+	Status           string `json:"status" gorm:"type:varchar(32);index"`
+	CreatedAt        int64  `json:"created_at" gorm:"index"`
+	SettledAt        int64  `json:"settled_at" gorm:"index"`
 }
 
 type UserInvitationRewardRecord struct {
-	Id             int    `json:"id"`
-	InviteeId      int    `json:"invitee_id"`
-	InviteeName    string `json:"invitee_name"`
-	RewardType     string `json:"reward_type"`
-	RewardQuota    int    `json:"reward_quota"`
-	TriggerAt      int64  `json:"trigger_at"`
-	TriggerTopUpId int    `json:"trigger_top_up_id"`
-	TriggerTradeNo string `json:"trigger_trade_no"`
-	Remark         string `json:"remark"`
-	Status         string `json:"status"`
-	CreatedAt      int64  `json:"created_at"`
-	SettledAt      int64  `json:"settled_at"`
+	InviteeName string `json:"invitee_name"`
+	RewardType  string `json:"reward_type"`
+	RewardQuota int    `json:"reward_quota"`
+	TriggerAt   int64  `json:"trigger_at"`
+	Status      string `json:"status"`
+	CreatedAt   int64  `json:"created_at"`
+	SettledAt   int64  `json:"settled_at"`
 }
 
 func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType string) (*InvitationReward, error) {
@@ -57,6 +55,20 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 	}
 	if inviteeId <= 0 || rewardType == "" {
 		return nil, nil
+	}
+
+	var existing InvitationReward
+	err := lockForUpdate(tx).
+		Where("invitee_id = ? AND reward_type = ?", inviteeId, rewardType).
+		First(&existing).Error
+	if err == nil {
+		if existing.Status != InvitationRewardStatusPending || existing.RewardQuota <= 0 {
+			return nil, nil
+		}
+		return settlePendingInvitationRewardTx(tx, &existing)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
 	}
 	if !operation_setting.IsPaymentComplianceConfirmed() {
 		return nil, nil
@@ -74,27 +86,13 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 	if invitee.InviterId == 0 {
 		return nil, nil
 	}
-
-	var inviter User
-	if err := lockForUpdate(tx).Select("id").Where("id = ?", invitee.InviterId).First(&inviter).Error; err != nil {
-		return nil, err
-	}
-
-	var existing InvitationReward
-	err := tx.Where("invitee_id = ? AND reward_type = ?", inviteeId, rewardType).First(&existing).Error
-	if err == nil {
-		return nil, nil
-	}
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
 	triggerAt := common.GetTimestamp()
 	triggerTopUpId := 0
 	triggerTradeNo := ""
 	if rewardType == InvitationRewardTypeFirstTopUp {
 		var successTopUpCount int64
 		if err := tx.Model(&TopUp{}).
-			Where("user_id = ? AND status = ?", inviteeId, common.TopUpStatusSuccess).
+			Where("user_id = ? AND purpose = ? AND status = ?", inviteeId, TopUpPurposeAPIBalance, common.TopUpStatusSuccess).
 			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Count(&successTopUpCount).Error; err != nil {
 			return nil, err
@@ -104,7 +102,7 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		}
 		var topUp TopUp
 		if err := tx.Select("id", "trade_no", "complete_time", "create_time").
-			Where("user_id = ? AND status = ?", inviteeId, common.TopUpStatusSuccess).
+			Where("user_id = ? AND purpose = ? AND status = ?", inviteeId, TopUpPurposeAPIBalance, common.TopUpStatusSuccess).
 			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
 			Order("id ASC").
 			First(&topUp).Error; err != nil {
@@ -129,24 +127,115 @@ func SettleInvitationMilestoneRewardTx(tx *gorm.DB, inviteeId int, rewardType st
 		TriggerTopUpId: triggerTopUpId,
 		TriggerTradeNo: triggerTradeNo,
 		RuleSnapshot:   buildInvitationRewardRuleSnapshot(rewardType, rewardQuota),
-		Status:         InvitationRewardStatusSettled,
+		Status:         InvitationRewardStatusPending,
 		CreatedAt:      now,
-		SettledAt:      now,
 	}
-	credited, err := addInvitationRewardQuotaTx(tx, reward.InviterId, rewardQuota, false)
+	if err = tx.Create(reward).Error; err != nil {
+		return nil, err
+	}
+	return settlePendingInvitationRewardTx(tx, reward)
+}
+
+// QueueInvitationFirstRequestRewardTx persists the amount owed for the first
+// successful request before request_count can advance. Configuration changes
+// after this point do not alter the snapshotted reward.
+func QueueInvitationFirstRequestRewardTx(tx *gorm.DB, inviteeId int) (*InvitationReward, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required")
+	}
+	if inviteeId <= 0 || !operation_setting.IsPaymentComplianceConfirmed() {
+		return nil, nil
+	}
+	rewardQuota := resolveInvitationMilestoneRewardQuota(InvitationRewardTypeFirstRequest)
+	if rewardQuota <= 0 {
+		return nil, nil
+	}
+
+	var existing InvitationReward
+	err := tx.Where("invitee_id = ? AND reward_type = ?", inviteeId, InvitationRewardTypeFirstRequest).First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	var invitee User
+	if err := lockForUpdate(tx).
+		Select("id", "inviter_id", "request_count").
+		Where("id = ?", inviteeId).
+		First(&invitee).Error; err != nil {
+		return nil, err
+	}
+	if invitee.InviterId <= 0 || invitee.RequestCount != 0 {
+		return nil, nil
+	}
+	var inviter User
+	if err := tx.Select("id").Where("id = ?", invitee.InviterId).First(&inviter).Error; err != nil {
+		return nil, err
+	}
+
+	now := common.GetTimestamp()
+	reward := &InvitationReward{
+		InviterId:    invitee.InviterId,
+		InviteeId:    invitee.Id,
+		RewardType:   InvitationRewardTypeFirstRequest,
+		RewardQuota:  rewardQuota,
+		TriggerAt:    now,
+		RuleSnapshot: buildInvitationRewardRuleSnapshot(InvitationRewardTypeFirstRequest, rewardQuota),
+		Status:       InvitationRewardStatusPending,
+		CreatedAt:    now,
+	}
+	result := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "invitee_id"}, {Name: "reward_type"}},
+		DoNothing: true,
+	}).Create(reward)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		if err := tx.Where("invitee_id = ? AND reward_type = ?", inviteeId, InvitationRewardTypeFirstRequest).First(&existing).Error; err != nil {
+			return nil, err
+		}
+		return &existing, nil
+	}
+	return reward, nil
+}
+
+func settlePendingInvitationRewardTx(tx *gorm.DB, reward *InvitationReward) (*InvitationReward, error) {
+	if tx == nil || reward == nil || reward.Id <= 0 || reward.Status != InvitationRewardStatusPending || reward.RewardQuota <= 0 {
+		return nil, nil
+	}
+	var inviter User
+	if err := lockForUpdate(tx).Select("id").Where("id = ?", reward.InviterId).First(&inviter).Error; err != nil {
+		return nil, err
+	}
+	credited, err := addInvitationRewardQuotaTx(tx, reward.InviterId, reward.RewardQuota, false)
 	if err != nil {
 		return nil, err
 	}
 	if !credited {
 		return nil, nil
 	}
-	if err = tx.Create(reward).Error; err != nil {
-		return nil, err
-	}
-	if err = CreateInvitationRewardEventTx(tx, reward); err != nil {
-		return nil, err
-	}
 
+	now := common.GetTimestamp()
+	result := tx.Model(&InvitationReward{}).
+		Where("id = ? AND status = ?", reward.Id, InvitationRewardStatusPending).
+		Updates(map[string]interface{}{"status": InvitationRewardStatusSettled, "settled_at": now})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, errors.New("invitation reward status changed during settlement")
+	}
+	reward.Status = InvitationRewardStatusSettled
+	reward.SettledAt = now
+	if err := CreateInvitationRewardEventTx(tx, reward); err != nil {
+		return nil, err
+	}
+	if err := createInvitationRewardFundTransactionTx(tx, reward); err != nil {
+		return nil, err
+	}
 	return reward, nil
 }
 
@@ -237,8 +326,40 @@ func CreateInvitationRegisterRewardTx(tx *gorm.DB, inviterId int, inviteeId int)
 		if err = CreateInvitationRewardEventTx(tx, reward); err != nil {
 			return nil, err
 		}
+		if err = createInvitationRewardFundTransactionTx(tx, reward); err != nil {
+			return nil, err
+		}
 	}
 	return reward, nil
+}
+
+func createInvitationRewardFundTransactionTx(tx *gorm.DB, reward *InvitationReward) error {
+	if tx == nil || reward == nil || reward.Id <= 0 || reward.RewardQuota <= 0 {
+		return nil
+	}
+	var inviter User
+	if err := tx.Select("aff_quota").Where("id = ?", reward.InviterId).First(&inviter).Error; err != nil {
+		return err
+	}
+	balanceAfter := int64(inviter.AffQuota)
+	return CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+		TransactionKey: fmt.Sprintf("invitation_reward:%d:issued", reward.Id),
+		Kind:           PromotionFundKindInvitationRewardIssued,
+		UserId:         reward.InviterId,
+		SourceType:     "invitation_rewards",
+		SourceId:       reward.Id,
+		SourceKey:      fmt.Sprintf("invitation_rewards:%d", reward.Id),
+		ActorType:      "system",
+		Remark:         reward.Remark,
+		OccurredAt:     reward.SettledAt,
+	}, []PromotionFundTransactionLeg{{
+		Account:      PromotionFundAccountReferralCredit,
+		Asset:        PromotionFundAssetQuota,
+		Amount:       int64(reward.RewardQuota),
+		SourceType:   "invitation_rewards",
+		SourceId:     reward.Id,
+		BalanceAfter: &balanceAfter,
+	}})
 }
 
 func buildInvitationRewardRuleSnapshot(rewardType string, rewardQuota int) string {
@@ -307,6 +428,21 @@ func GetUserInvitationRewardRecords(inviterId int, pageInfo *common.PageInfo) (
 	total int64,
 	err error,
 ) {
+	var pendingInviteeIds []int
+	if err = DB.Model(&InvitationReward{}).
+		Where("inviter_id = ? AND reward_type = ? AND status = ?", inviterId, InvitationRewardTypeFirstRequest, InvitationRewardStatusPending).
+		Order("id ASC").
+		Pluck("invitee_id", &pendingInviteeIds).Error; err != nil {
+		return nil, 0, err
+	}
+	for _, inviteeId := range pendingInviteeIds {
+		settled, settleErr := SettleInvitationMilestoneReward(inviteeId, InvitationRewardTypeFirstRequest)
+		if settleErr != nil {
+			return nil, 0, settleErr
+		}
+		RecordInvitationMilestoneRewardLog(settled)
+	}
+
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -324,7 +460,7 @@ func GetUserInvitationRewardRecords(inviterId int, pageInfo *common.PageInfo) (
 	}
 
 	err = tx.Table("invitation_rewards").
-		Select("invitation_rewards.id, invitation_rewards.invitee_id, COALESCE(NULLIF(users.display_name, ''), users.username) AS invitee_name, invitation_rewards.reward_type, invitation_rewards.reward_quota, invitation_rewards.trigger_at, invitation_rewards.trigger_top_up_id, invitation_rewards.trigger_trade_no, invitation_rewards.remark, invitation_rewards.status, invitation_rewards.created_at, invitation_rewards.settled_at").
+		Select("COALESCE(NULLIF(users.display_name, ''), users.username) AS invitee_name, invitation_rewards.reward_type, invitation_rewards.reward_quota, invitation_rewards.trigger_at, invitation_rewards.status, invitation_rewards.created_at, invitation_rewards.settled_at").
 		Joins("LEFT JOIN users ON users.id = invitation_rewards.invitee_id").
 		Where("invitation_rewards.inviter_id = ? AND invitation_rewards.reward_quota > 0", inviterId).
 		Order("invitation_rewards.id DESC").

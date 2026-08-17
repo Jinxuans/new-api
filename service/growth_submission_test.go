@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
@@ -71,6 +72,7 @@ func TestCreateGrowthSubmissionEnforcesDailyLimitInsideTransaction(t *testing.T)
 
 func TestGrowthSubmissionLifecycleIsRecordedInPromotionEvents(t *testing.T) {
 	truncate(t)
+	seedFinancialActor(t, 91, common.RoleAdminUser)
 	seedUser(t, 3112, 0)
 	withGrowthSetting(t, func(setting *operation_setting.GrowthSetting) {
 		setting.SubmissionEnabled = true

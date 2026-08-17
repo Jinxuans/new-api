@@ -120,15 +120,26 @@ export interface SubscriptionPayResponse {
 
 export interface CreateUserSubscriptionRequest {
   plan_id: number
+  reason: string
+  idempotency_key: string
+}
+
+export interface InvalidateUserSubscriptionRequest {
+  reason: string
+  idempotency_key: string
 }
 
 export interface ResetUserSubscriptionsRequest {
   plan_id: number
   advance_reset_time: boolean
+  reason: string
+  idempotency_key: string
 }
 
 export interface ResetPlanSubscriptionsRequest {
   advance_reset_time: boolean
+  reason: string
+  idempotency_key: string
 }
 
 export interface SubscriptionResetResult {
@@ -137,6 +148,7 @@ export interface SubscriptionResetResult {
   reset_count: number
   user_count: number
   advance_reset_time: boolean
+  replayed?: boolean
 }
 
 // ============================================================================

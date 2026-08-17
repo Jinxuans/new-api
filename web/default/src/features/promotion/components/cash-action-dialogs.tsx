@@ -49,7 +49,7 @@ import {
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { formatCashCents } from '@/features/promotion/shared'
+import { formatMinorAmount } from '@/lib/currency'
 import { formatQuota } from '@/lib/format'
 
 import {
@@ -87,7 +87,11 @@ export function CashActionDialogs(props: CashActionDialogsProps) {
     ])
   }
   const conversionMutation = useMutation({
-    mutationFn: convertAllCashToBalance,
+    mutationFn: () =>
+      convertAllCashToBalance({
+        expected_amount_cents: props.earnings.withdrawableCashCents,
+        expected_quota_equivalent: props.earnings.cashQuotaEquivalent,
+      }),
     onSuccess: async () => {
       props.onConversionOpenChange(false)
       toast.success(t('Cash commission converted to API balance'))
@@ -101,6 +105,8 @@ export function CashActionDialogs(props: CashActionDialogsProps) {
         payout_method: values.payoutMethod,
         payout_account: values.payoutAccount,
         remark: values.remark,
+        expected_amount_cents: props.earnings.withdrawableCashCents,
+        expected_quota_equivalent: props.earnings.cashQuotaEquivalent,
       }),
     onSuccess: async () => {
       props.onWithdrawalOpenChange(false)
@@ -110,7 +116,7 @@ export function CashActionDialogs(props: CashActionDialogsProps) {
     },
     onError: (error: Error) => toast.error(error.message),
   })
-  const cash = formatCashCents(
+  const cash = formatMinorAmount(
     props.earnings.withdrawableCashCents,
     props.earnings.cashCurrency
   )

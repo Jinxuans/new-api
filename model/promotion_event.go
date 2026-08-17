@@ -23,22 +23,24 @@ const (
 	PromotionEventSourceInvitationQuota      = "invitation_quota"
 	PromotionEventSourceCommissionWithdrawal = "promotion_commission_withdrawal"
 
-	PromotionEventTypeInvitationRegisterReward     = "invitation_register_reward"
-	PromotionEventTypeInvitationFirstRequestReward = "invitation_first_request_reward"
-	PromotionEventTypeInvitationFirstTopUpReward   = "invitation_first_topup_reward"
-	PromotionEventTypeCommissionPending            = "commission_pending"
-	PromotionEventTypeCommissionSettled            = "commission_settled"
-	PromotionEventTypeCommissionTransferred        = "commission_transferred"
-	PromotionEventTypePromotionRewardTransferred   = "promotion_reward_transferred"
-	PromotionEventTypeCommissionWithdrawSubmitted  = "commission_withdraw_submitted"
-	PromotionEventTypeCommissionWithdrawApproved   = "commission_withdraw_approved"
-	PromotionEventTypeCommissionWithdrawRejected   = "commission_withdraw_rejected"
-	PromotionEventTypeCommissionWithdrawPaid       = "commission_withdraw_paid"
-	PromotionEventTypeCommissionReversed           = "commission_reversed"
-	PromotionEventTypeGrowthRewardSettled          = "growth_reward_settled"
-	PromotionEventTypeGrowthSubmissionCreated      = "growth_submission_created"
-	PromotionEventTypeGrowthSubmissionApproved     = "growth_submission_approved"
-	PromotionEventTypeGrowthSubmissionRejected     = "growth_submission_rejected"
+	PromotionEventTypeInvitationRegisterReward          = "invitation_register_reward"
+	PromotionEventTypeInvitationFirstRequestReward      = "invitation_first_request_reward"
+	PromotionEventTypeInvitationFirstTopUpReward        = "invitation_first_topup_reward"
+	PromotionEventTypeCommissionPending                 = "commission_pending"
+	PromotionEventTypeCommissionSettled                 = "commission_settled"
+	PromotionEventTypeCommissionTransferred             = "commission_transferred"
+	PromotionEventTypePromotionRewardTransferred        = "promotion_reward_transferred"
+	PromotionEventTypeCommissionWithdrawSubmitted       = "commission_withdraw_submitted"
+	PromotionEventTypeCommissionWithdrawApproved        = "commission_withdraw_approved"
+	PromotionEventTypeCommissionWithdrawPayoutInitiated = "commission_withdraw_payout_initiated"
+	PromotionEventTypeCommissionWithdrawFailed          = "commission_withdraw_failed"
+	PromotionEventTypeCommissionWithdrawRejected        = "commission_withdraw_rejected"
+	PromotionEventTypeCommissionWithdrawPaid            = "commission_withdraw_paid"
+	PromotionEventTypeCommissionReversed                = "commission_reversed"
+	PromotionEventTypeGrowthRewardSettled               = "growth_reward_settled"
+	PromotionEventTypeGrowthSubmissionCreated           = "growth_submission_created"
+	PromotionEventTypeGrowthSubmissionApproved          = "growth_submission_approved"
+	PromotionEventTypeGrowthSubmissionRejected          = "growth_submission_rejected"
 )
 
 type PromotionEvent struct {
@@ -205,11 +207,23 @@ func backfillPromotionWithdrawalEventsTx(tx *gorm.DB, withdrawal *PromotionWithd
 	switch withdrawal.Status {
 	case PromotionWithdrawalStatusApproved:
 		return createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawApproved, "Cash withdrawal request approved", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.ReviewedAt)
+	case PromotionWithdrawalStatusProcessing:
+		if err := createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawApproved, "Cash withdrawal request approved", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.ReviewedAt); err != nil {
+			return err
+		}
+		return createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawPayoutInitiated, "Cash withdrawal payout initiated", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.PayoutInitiatedAt)
 	case PromotionWithdrawalStatusRejected:
 		return createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawRejected, "Cash withdrawal request rejected", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.ReviewedAt)
+	case PromotionWithdrawalStatusFailed:
+		return createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawFailed, "Cash withdrawal payout failed", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.ReviewedAt)
 	case PromotionWithdrawalStatusPaid:
 		if err := createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawApproved, "Cash withdrawal request approved", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.ReviewedAt); err != nil {
 			return err
+		}
+		if withdrawal.PayoutInitiatedAt > 0 {
+			if err := createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawPayoutInitiated, "Cash withdrawal payout initiated", PromotionEventDirectionStatus, withdrawal.NetAmountCents, withdrawal.PayoutInitiatedAt); err != nil {
+				return err
+			}
 		}
 		return createPromotionWithdrawalStatusEventTx(tx, withdrawal, PromotionEventTypeCommissionWithdrawPaid, "Cash withdrawal paid", PromotionEventDirectionOutcome, -withdrawal.NetAmountCents, withdrawal.PaidAt)
 	default:

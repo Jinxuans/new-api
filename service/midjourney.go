@@ -72,7 +72,10 @@ func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.M
 		return false, errors.New("Midjourney task must be persisted before billing")
 	}
 
-	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true)
+	// The upstream has already accepted the request and the durable task marker
+	// is persisted. Settle it even if refund recovery froze new spending in the
+	// meantime; TokenAuth still prevents any later request from starting.
+	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true, true)
 	if !result.FundingApplied {
 		task.Quota = 0
 		task.TokenId = 0

@@ -42,10 +42,19 @@ type PromotionCommissionSummary struct {
 	AvailableQuotaEquivalent int64  `json:"available_quota_equivalent"`
 }
 
+var ErrPromotionCommissionBalanceChanged = errors.New("cash commission balance changed; refresh and confirm again")
+
+type PromotionCommissionBalanceExpectation struct {
+	AmountCents     int64 `json:"expected_amount_cents"`
+	QuotaEquivalent int64 `json:"expected_quota_equivalent"`
+}
+
 type PromotionWithdrawalRequest struct {
-	PayoutMethod  string `json:"payout_method"`
-	PayoutAccount string `json:"payout_account"`
-	Remark        string `json:"remark"`
+	PayoutMethod            string `json:"payout_method"`
+	PayoutAccount           string `json:"payout_account"`
+	Remark                  string `json:"remark"`
+	ExpectedAmountCents     int64  `json:"expected_amount_cents"`
+	ExpectedQuotaEquivalent int64  `json:"expected_quota_equivalent"`
 }
 
 type PromotionWithdrawalReviewRequest struct {
@@ -157,16 +166,21 @@ func GetPromotionCommissionSummary(userId int) (*PromotionCommissionSummary, err
 	var rows []statusAmountRow
 	if err := model.DB.Model(&model.PromotionCommissionLedger{}).
 		Select("status, COALESCE(SUM(net_amount_cents), 0) AS amount, COALESCE(SUM(quota_equivalent), 0) AS quota").
-		Where("user_id = ? AND cashable = ? AND currency = ?", userId, true, "CNY").
+		Where("user_id = ? AND cashable = ? AND currency = ? AND status <> ?", userId, true, "CNY", model.PromotionCommissionStatusSettled).
 		Group("status").
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
+	var available statusAmountRow
+	if err := model.AvailablePromotionCommissionLedgersQuery(model.DB, userId).
+		Select("COALESCE(SUM(net_amount_cents), 0) AS amount, COALESCE(SUM(quota_equivalent), 0) AS quota").
+		Scan(&available).Error; err != nil {
+		return nil, err
+	}
+	summary.AvailableAmountCents = available.Amount
+	summary.AvailableQuotaEquivalent = available.Quota
 	for _, row := range rows {
 		switch row.Status {
-		case model.PromotionCommissionStatusSettled:
-			summary.AvailableAmountCents = row.Amount
-			summary.AvailableQuotaEquivalent = row.Quota
 		case model.PromotionCommissionStatusPending:
 			summary.PendingAmountCents = row.Amount
 		case model.PromotionCommissionStatusWithdrawing:
@@ -180,7 +194,7 @@ func GetPromotionCommissionSummary(userId int) (*PromotionCommissionSummary, err
 	return summary, nil
 }
 
-func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
+func TransferAllSettledPromotionCommissionsToQuota(userId int, expected PromotionCommissionBalanceExpectation) (int, error) {
 	if userId <= 0 {
 		return 0, errors.New("invalid user")
 	}
@@ -197,6 +211,9 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 		if len(ledgers) == 0 {
 			return errors.New("no settled cash commission available")
 		}
+		if err := model.EnsurePromotionFundOutflowAllowedTx(tx, userId); err != nil {
+			return err
+		}
 		ledgerIds := make([]int, 0, len(ledgers))
 		var transferredQuotaTotal int64
 		for _, ledger := range ledgers {
@@ -206,6 +223,9 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 				return err
 			}
 			ledgerIds = append(ledgerIds, ledger.Id)
+		}
+		if transferredAmountCents != expected.AmountCents || transferredQuotaTotal != expected.QuotaEquivalent {
+			return ErrPromotionCommissionBalanceChanged
 		}
 		transferredQuota = int(transferredQuotaTotal)
 		now := common.GetTimestamp()
@@ -221,6 +241,13 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 		if res.RowsAffected != int64(len(ledgerIds)) {
 			return errors.New("commission status changed, please retry")
 		}
+		var wallet model.User
+		if err := model.LockUserForGrowthRewardTx(tx, userId); err != nil {
+			return err
+		}
+		if err := tx.Select("quota").Where("id = ?", userId).First(&wallet).Error; err != nil {
+			return err
+		}
 		maxCurrentQuota := common.MaxQuota - 1 - transferredQuota
 		walletUpdate := tx.Model(&model.User{}).
 			Where("id = ? AND quota <= ?", userId, maxCurrentQuota).
@@ -231,8 +258,38 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int) (int, error) {
 		if walletUpdate.RowsAffected != 1 {
 			return model.ErrTopUpQuotaLimitExceeded
 		}
+		runningWalletBalance := int64(wallet.Quota)
+		for _, ledger := range ledgers {
+			runningWalletBalance += int64(ledger.QuotaEquivalent)
+			balanceAfter := runningWalletBalance
+			if err := model.CreatePromotionFundTransactionTx(tx, &model.PromotionFundTransaction{
+				TransactionKey: fmt.Sprintf("commission:%d:transferred", ledger.Id),
+				Kind:           model.PromotionFundKindCommissionTransferredToBalance,
+				UserId:         userId,
+				SourceType:     "promotion_commission_ledgers",
+				SourceId:       ledger.Id,
+				SourceKey:      fmt.Sprintf("%s:%d", ledger.SourceType, ledger.SourceId),
+				ActorType:      "user",
+				ActorId:        userId,
+				ExternalRef:    ledger.SourceTradeNo,
+				OccurredAt:     now,
+			}, []model.PromotionFundTransactionLeg{
+				{
+					Account: model.PromotionFundAccountCommissionAvailable, Asset: model.PromotionFundAssetCash,
+					Currency: ledger.Currency, Amount: -ledger.NetAmountCents,
+					SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+				},
+				{
+					Account: model.PromotionFundAccountAPIBalance, Asset: model.PromotionFundAssetQuota,
+					Amount: int64(ledger.QuotaEquivalent), SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+					BalanceAfter: &balanceAfter,
+				},
+			}); err != nil {
+				return err
+			}
+		}
 		return model.CreatePromotionEventTx(tx, &model.PromotionEvent{
-			EventKey:        fmt.Sprintf("%s:%s:%d:%d", model.PromotionEventTypeCommissionTransferred, model.PromotionEventSourceCommissionTransfer, userId, now),
+			EventKey:        fmt.Sprintf("%s:%s:%d:%d:%d", model.PromotionEventTypeCommissionTransferred, model.PromotionEventSourceCommissionTransfer, userId, ledgerIds[0], ledgerIds[len(ledgerIds)-1]),
 			UserId:          userId,
 			EventType:       model.PromotionEventTypeCommissionTransferred,
 			SourceTable:     model.PromotionEventSourceCommissionTransfer,
@@ -277,6 +334,9 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 		if len(ledgers) == 0 {
 			return errors.New("no settled cash commission available")
 		}
+		if err := model.EnsurePromotionFundOutflowAllowedTx(tx, userId); err != nil {
+			return err
+		}
 
 		ledgerIds := make([]int, 0, len(ledgers))
 		var grossAmountCents int64
@@ -288,6 +348,9 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 				return err
 			}
 			ledgerIds = append(ledgerIds, ledger.Id)
+		}
+		if grossAmountCents != req.ExpectedAmountCents || quotaEquivalentTotal != req.ExpectedQuotaEquivalent {
+			return ErrPromotionCommissionBalanceChanged
 		}
 		quotaEquivalent := int(quotaEquivalentTotal)
 		accountSnapshot, err := common.Marshal(map[string]interface{}{
@@ -308,6 +371,16 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 			PayoutAccountSnapshot: string(accountSnapshot),
 		}
 		if err := tx.Create(nextWithdrawal).Error; err != nil {
+			return err
+		}
+		if err := model.CreatePromotionWithdrawalOperationTx(tx, &model.PromotionWithdrawalOperation{
+			WithdrawalId: nextWithdrawal.Id,
+			Action:       model.PromotionWithdrawalActionSubmitted,
+			ActorType:    model.PromotionWithdrawalActorUser,
+			ActorId:      userId,
+			Note:         req.Remark,
+			CreatedAt:    nextWithdrawal.AppliedAt,
+		}); err != nil {
 			return err
 		}
 		items := make([]*model.PromotionWithdrawalItem, 0, len(ledgers))
@@ -333,6 +406,35 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 		if res.RowsAffected != int64(len(ledgerIds)) {
 			return errors.New("commission status changed, please retry")
 		}
+		reserveLegs := make([]model.PromotionFundTransactionLeg, 0, len(items)*2)
+		for _, item := range items {
+			reserveLegs = append(reserveLegs,
+				model.PromotionFundTransactionLeg{
+					Account: model.PromotionFundAccountCommissionAvailable, Asset: model.PromotionFundAssetCash,
+					Currency: nextWithdrawal.Currency, Amount: -item.AmountCents,
+					SourceType: "promotion_commission_ledgers", SourceId: item.LedgerId,
+				},
+				model.PromotionFundTransactionLeg{
+					Account: model.PromotionFundAccountCommissionReserved, Asset: model.PromotionFundAssetCash,
+					Currency: nextWithdrawal.Currency, Amount: item.AmountCents,
+					SourceType: "promotion_commission_ledgers", SourceId: item.LedgerId,
+				},
+			)
+		}
+		if err := model.CreatePromotionFundTransactionTx(tx, &model.PromotionFundTransaction{
+			TransactionKey: fmt.Sprintf("withdrawal:%d:reserved", nextWithdrawal.Id),
+			Kind:           model.PromotionFundKindCommissionWithdrawalReserved,
+			UserId:         userId,
+			SourceType:     "promotion_withdrawals",
+			SourceId:       nextWithdrawal.Id,
+			SourceKey:      fmt.Sprintf("promotion_withdrawals:%d", nextWithdrawal.Id),
+			ActorType:      "user",
+			ActorId:        userId,
+			Remark:         req.Remark,
+			OccurredAt:     nextWithdrawal.AppliedAt,
+		}, reserveLegs); err != nil {
+			return err
+		}
 		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
 			UserId:          userId,
 			EventType:       model.PromotionEventTypeCommissionWithdrawSubmitted,
@@ -349,6 +451,9 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 		}); err != nil {
 			return err
 		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, nextWithdrawal); err != nil {
+			return err
+		}
 		withdrawal = nextWithdrawal
 		return nil
 	})
@@ -359,12 +464,26 @@ func CreatePromotionWithdrawal(userId int, req PromotionWithdrawalRequest) (*mod
 	return withdrawal, nil
 }
 
-func ListPromotionCommissionLedgers(userId int, pageInfo *common.PageInfo) ([]*model.PromotionCommissionLedger, int64, error) {
-	return model.ListPromotionCommissionLedgers(userId, pageInfo)
+func ListPromotionCommissionLedgers(userId int, pageInfo *common.PageInfo) ([]*UserPromotionCommissionLedger, int64, error) {
+	return listUserPromotionCommissionLedgers(userId, pageInfo)
 }
 
-func ListPromotionWithdrawals(userId int, pageInfo *common.PageInfo) ([]*model.PromotionWithdrawal, int64, error) {
-	return model.ListPromotionWithdrawals(userId, pageInfo)
+func ListPromotionWithdrawals(userId int, pageInfo *common.PageInfo) ([]*UserPromotionWithdrawal, int64, error) {
+	return listUserPromotionWithdrawals(userId, pageInfo)
+}
+
+func GetPromotionWithdrawal(userId int, id int) (*UserPromotionWithdrawal, error) {
+	if userId <= 0 || id <= 0 {
+		return nil, errors.New("invalid withdrawal")
+	}
+	return getUserPromotionWithdrawal(userId, id)
+}
+
+func GetAdminPromotionWithdrawal(id int) (*model.PromotionWithdrawal, error) {
+	if id <= 0 {
+		return nil, errors.New("invalid withdrawal")
+	}
+	return model.GetPromotionWithdrawalById(id)
 }
 
 func GetCheckinStats(userId int, month string) (map[string]interface{}, error) {
@@ -374,7 +493,7 @@ func GetCheckinStats(userId int, month string) (map[string]interface{}, error) {
 func AdminApprovePromotionWithdrawal(id int, reviewerId int, req PromotionWithdrawalReviewRequest) (*model.PromotionWithdrawal, error) {
 	var withdrawal *model.PromotionWithdrawal
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
-		updatedWithdrawal, err := updatePromotionWithdrawalReviewTx(tx, id, reviewerId, model.PromotionWithdrawalStatusApproved, req.TradeNo, req.ReviewNote, []string{
+		updatedWithdrawal, err := updatePromotionWithdrawalReviewTx(tx, id, reviewerId, model.PromotionWithdrawalStatusApproved, "", req.ReviewNote, []string{
 			model.PromotionWithdrawalStatusPendingReview,
 		})
 		if err != nil {
@@ -383,20 +502,93 @@ func AdminApprovePromotionWithdrawal(id int, reviewerId int, req PromotionWithdr
 		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
 			return err
 		}
-		withdrawal = updatedWithdrawal
-		return model.CreatePromotionEventTx(tx, &model.PromotionEvent{
-			UserId:          withdrawal.UserId,
+		if err := model.EnsurePromotionFundOutflowAllowedTx(tx, updatedWithdrawal.UserId); err != nil {
+			return err
+		}
+		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
+			UserId:          updatedWithdrawal.UserId,
 			EventType:       model.PromotionEventTypeCommissionWithdrawApproved,
 			SourceTable:     model.PromotionEventSourceWithdrawal,
-			SourceId:        withdrawal.Id,
+			SourceId:        updatedWithdrawal.Id,
 			Direction:       model.PromotionEventDirectionStatus,
-			CashAmountCents: withdrawal.NetAmountCents,
-			Currency:        withdrawal.Currency,
-			Status:          withdrawal.Status,
+			CashAmountCents: updatedWithdrawal.NetAmountCents,
+			Currency:        updatedWithdrawal.Currency,
+			Status:          updatedWithdrawal.Status,
 			Title:           "Cash withdrawal request approved",
-			Remark:          req.ReviewNote,
-			CreatedAt:       withdrawal.ReviewedAt,
+			Remark:          updatedWithdrawal.ReviewNote,
+			CreatedAt:       updatedWithdrawal.ReviewedAt,
+		}); err != nil {
+			return err
+		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, updatedWithdrawal); err != nil {
+			return err
+		}
+		withdrawal = updatedWithdrawal
+		return nil
+	})
+	return withdrawal, err
+}
+
+func AdminInitiatePromotionWithdrawalPayout(id int, reviewerId int, req PromotionWithdrawalReviewRequest) (*model.PromotionWithdrawal, error) {
+	req.TradeNo = strings.TrimSpace(req.TradeNo)
+	if req.TradeNo == "" {
+		return nil, model.ErrPromotionWithdrawalPayoutReferenceRequired
+	}
+	var withdrawal *model.PromotionWithdrawal
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		current, err := model.LockPromotionWithdrawalTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if current.Status == model.PromotionWithdrawalStatusProcessing {
+			if !strings.EqualFold(strings.TrimSpace(current.TradeNo), req.TradeNo) ||
+				strings.TrimSpace(current.ReviewNote) != strings.TrimSpace(req.ReviewNote) {
+				return model.ErrPromotionWithdrawalPayoutReferenceConflict
+			}
+			if err := model.ClaimPromotionWithdrawalPayoutReferenceTx(tx, current, req.TradeNo); err != nil {
+				return err
+			}
+			if err := model.LoadPromotionWithdrawalOperationsTx(tx, current); err != nil {
+				return err
+			}
+			withdrawal = current
+			return nil
+		}
+		updatedWithdrawal, err := updatePromotionWithdrawalReviewTx(tx, id, reviewerId, model.PromotionWithdrawalStatusProcessing, req.TradeNo, req.ReviewNote, []string{
+			model.PromotionWithdrawalStatusApproved,
 		})
+		if err != nil {
+			return err
+		}
+		if err := model.ClaimPromotionWithdrawalPayoutReferenceTx(tx, updatedWithdrawal, updatedWithdrawal.TradeNo); err != nil {
+			return err
+		}
+		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
+			return err
+		}
+		if err := model.EnsurePromotionFundOutflowAllowedTx(tx, updatedWithdrawal.UserId); err != nil {
+			return err
+		}
+		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
+			UserId:          updatedWithdrawal.UserId,
+			EventType:       model.PromotionEventTypeCommissionWithdrawPayoutInitiated,
+			SourceTable:     model.PromotionEventSourceWithdrawal,
+			SourceId:        updatedWithdrawal.Id,
+			Direction:       model.PromotionEventDirectionStatus,
+			CashAmountCents: updatedWithdrawal.NetAmountCents,
+			Currency:        updatedWithdrawal.Currency,
+			Status:          updatedWithdrawal.Status,
+			Title:           "Cash withdrawal payout initiated",
+			Remark:          updatedWithdrawal.ReviewNote,
+			CreatedAt:       updatedWithdrawal.PayoutInitiatedAt,
+		}); err != nil {
+			return err
+		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, updatedWithdrawal); err != nil {
+			return err
+		}
+		withdrawal = updatedWithdrawal
+		return nil
 	})
 	return withdrawal, err
 }
@@ -411,88 +603,309 @@ func AdminRejectPromotionWithdrawal(id int, reviewerId int, req PromotionWithdra
 		if err != nil {
 			return err
 		}
-		withdrawal = updatedWithdrawal
-		if err := releasePromotionWithdrawalLedgersTx(tx, withdrawal.Id, model.PromotionCommissionStatusSettled); err != nil {
+		if err := releasePromotionWithdrawalLedgersTx(tx, updatedWithdrawal.Id, model.PromotionCommissionStatusSettled); err != nil {
 			return err
 		}
-		return model.CreatePromotionEventTx(tx, &model.PromotionEvent{
-			UserId:          withdrawal.UserId,
+		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
+			UserId:          updatedWithdrawal.UserId,
 			EventType:       model.PromotionEventTypeCommissionWithdrawRejected,
 			SourceTable:     model.PromotionEventSourceWithdrawal,
-			SourceId:        withdrawal.Id,
+			SourceId:        updatedWithdrawal.Id,
 			Direction:       model.PromotionEventDirectionStatus,
-			CashAmountCents: withdrawal.NetAmountCents,
-			Currency:        withdrawal.Currency,
-			Status:          withdrawal.Status,
+			CashAmountCents: updatedWithdrawal.NetAmountCents,
+			Currency:        updatedWithdrawal.Currency,
+			Status:          updatedWithdrawal.Status,
 			Title:           "Cash withdrawal request rejected",
-			Remark:          req.ReviewNote,
-			CreatedAt:       withdrawal.ReviewedAt,
+			Remark:          updatedWithdrawal.ReviewNote,
+			CreatedAt:       updatedWithdrawal.ReviewedAt,
+		}); err != nil {
+			return err
+		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, updatedWithdrawal); err != nil {
+			return err
+		}
+		withdrawal = updatedWithdrawal
+		return nil
+	})
+	return withdrawal, err
+}
+
+func AdminMarkPromotionWithdrawalFailed(id int, reviewerId int, req PromotionWithdrawalReviewRequest) (*model.PromotionWithdrawal, error) {
+	req.TradeNo = strings.TrimSpace(req.TradeNo)
+	req.FailureNote = strings.TrimSpace(req.FailureNote)
+	if req.TradeNo == "" {
+		return nil, model.ErrPromotionWithdrawalPayoutReferenceRequired
+	}
+	if req.FailureNote == "" {
+		return nil, model.ErrPromotionWithdrawalFailureReasonRequired
+	}
+
+	var withdrawal *model.PromotionWithdrawal
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		current, err := model.LockPromotionWithdrawalTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(strings.TrimSpace(current.TradeNo), req.TradeNo) {
+			return model.ErrPromotionWithdrawalPayoutReferenceConflict
+		}
+		if err := model.ClaimPromotionWithdrawalPayoutReferenceTx(tx, current, req.TradeNo); err != nil {
+			return err
+		}
+		if current.Status == model.PromotionWithdrawalStatusFailed {
+			if err := model.LoadPromotionWithdrawalOperationsTx(tx, current); err != nil {
+				return err
+			}
+			for _, operation := range current.Operations {
+				if operation.Action != model.PromotionWithdrawalActionPayoutFailed {
+					continue
+				}
+				if !strings.EqualFold(strings.TrimSpace(current.TradeNo), req.TradeNo) ||
+					!strings.EqualFold(strings.TrimSpace(operation.ExternalReference), req.TradeNo) ||
+					strings.TrimSpace(operation.Note) != req.FailureNote {
+					return model.ErrPromotionWithdrawalFailureConflict
+				}
+				withdrawal = current
+				return nil
+			}
+			return errors.New("withdrawal status does not allow this operation")
+		}
+
+		updatedWithdrawal, err := updatePromotionWithdrawalReviewTx(tx, id, reviewerId, model.PromotionWithdrawalStatusFailed, req.TradeNo, req.FailureNote, []string{
+			model.PromotionWithdrawalStatusProcessing,
 		})
+		if err != nil {
+			return err
+		}
+		if err := releasePromotionWithdrawalLedgersTx(tx, updatedWithdrawal.Id, model.PromotionCommissionStatusSettled); err != nil {
+			return err
+		}
+		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
+			UserId:          updatedWithdrawal.UserId,
+			EventType:       model.PromotionEventTypeCommissionWithdrawFailed,
+			SourceTable:     model.PromotionEventSourceWithdrawal,
+			SourceId:        updatedWithdrawal.Id,
+			Direction:       model.PromotionEventDirectionStatus,
+			CashAmountCents: updatedWithdrawal.NetAmountCents,
+			Currency:        updatedWithdrawal.Currency,
+			Status:          updatedWithdrawal.Status,
+			Title:           "Cash withdrawal payout failed",
+			Remark:          updatedWithdrawal.ReviewNote,
+			CreatedAt:       updatedWithdrawal.ReviewedAt,
+		}); err != nil {
+			return err
+		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, updatedWithdrawal); err != nil {
+			return err
+		}
+		withdrawal = updatedWithdrawal
+		return nil
 	})
 	return withdrawal, err
 }
 
 func AdminMarkPromotionWithdrawalPaid(id int, reviewerId int, req PromotionWithdrawalReviewRequest) (*model.PromotionWithdrawal, error) {
+	if id <= 0 || reviewerId <= 0 {
+		return nil, errors.New("invalid withdrawal")
+	}
+	req.TradeNo = strings.TrimSpace(req.TradeNo)
+	req.ReviewNote = strings.TrimSpace(req.ReviewNote)
+
 	var withdrawal *model.PromotionWithdrawal
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		current, err := model.LockPromotionWithdrawalTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if current.Status == model.PromotionWithdrawalStatusPaid {
+			if req.TradeNo != "" && !strings.EqualFold(req.TradeNo, strings.TrimSpace(current.TradeNo)) {
+				return model.ErrPromotionWithdrawalPayoutReferenceConflict
+			}
+			if err := model.ClaimPromotionWithdrawalPayoutReferenceTx(tx, current, current.TradeNo); err != nil {
+				return err
+			}
+			paidJournalExists, err := model.ValidatePromotionWithdrawalPaidTransactionTx(tx, current)
+			if err != nil {
+				return err
+			}
+			if !paidJournalExists {
+				return errors.New("paid withdrawal has no confirmed payout journal")
+			}
+			if err := model.LoadPromotionWithdrawalOperationsTx(tx, current); err != nil {
+				return err
+			}
+			for _, operation := range current.Operations {
+				if operation.Action != model.PromotionWithdrawalActionPaid {
+					continue
+				}
+				if !strings.EqualFold(strings.TrimSpace(operation.ExternalReference), strings.TrimSpace(current.TradeNo)) ||
+					strings.TrimSpace(operation.Note) != req.ReviewNote ||
+					strings.TrimSpace(current.ReviewNote) != req.ReviewNote {
+					return model.ErrPromotionWithdrawalPaidConflict
+				}
+				withdrawal = current
+				return nil
+			}
+			// Legacy rows may have a valid immutable payout journal but lack a
+			// reconstructable operation timestamp. The journal is the economic
+			// proof; require the retry payload to match the stored confirmation.
+			if strings.TrimSpace(current.ReviewNote) != req.ReviewNote {
+				return model.ErrPromotionWithdrawalPaidConflict
+			}
+			withdrawal = current
+			return nil
+		}
+
 		updatedWithdrawal, err := updatePromotionWithdrawalReviewTx(tx, id, reviewerId, model.PromotionWithdrawalStatusPaid, req.TradeNo, req.ReviewNote, []string{
-			model.PromotionWithdrawalStatusApproved,
+			model.PromotionWithdrawalStatusProcessing,
 		})
 		if err != nil {
 			return err
 		}
-		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
+		if err := model.ClaimPromotionWithdrawalPayoutReferenceTx(tx, updatedWithdrawal, updatedWithdrawal.TradeNo); err != nil {
+			return err
+		}
+		paidJournalExists, err := model.ValidatePromotionWithdrawalPaidTransactionTx(tx, updatedWithdrawal)
+		if err != nil {
+			return err
+		}
+		if !paidJournalExists {
+			if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, updatedWithdrawal.Id); err != nil {
+				return err
+			}
+			if err := model.EnsurePromotionFundOutflowAllowedTx(tx, updatedWithdrawal.UserId); err != nil {
+				return err
+			}
+			if err := releasePromotionWithdrawalLedgersTx(tx, updatedWithdrawal.Id, model.PromotionCommissionStatusWithdrawn); err != nil {
+				return err
+			}
+		}
+		if err := model.CreatePromotionEventTx(tx, &model.PromotionEvent{
+			UserId:          updatedWithdrawal.UserId,
+			EventType:       model.PromotionEventTypeCommissionWithdrawPaid,
+			SourceTable:     model.PromotionEventSourceWithdrawal,
+			SourceId:        updatedWithdrawal.Id,
+			Direction:       model.PromotionEventDirectionOutcome,
+			CashAmountCents: -updatedWithdrawal.NetAmountCents,
+			Currency:        updatedWithdrawal.Currency,
+			Status:          updatedWithdrawal.Status,
+			Title:           "Cash withdrawal paid",
+			Remark:          updatedWithdrawal.ReviewNote,
+			CreatedAt:       updatedWithdrawal.PaidAt,
+		}); err != nil {
+			return err
+		}
+		if err := model.LoadPromotionWithdrawalOperationsTx(tx, updatedWithdrawal); err != nil {
 			return err
 		}
 		withdrawal = updatedWithdrawal
-		if err := releasePromotionWithdrawalLedgersTx(tx, withdrawal.Id, model.PromotionCommissionStatusWithdrawn); err != nil {
-			return err
-		}
-		now := common.GetTimestamp()
-		if err := tx.Model(&model.PromotionCommissionLedger{}).
-			Where("id IN (?)", tx.Model(&model.PromotionWithdrawalItem{}).Select("ledger_id").Where("withdrawal_id = ?", withdrawal.Id)).
-			Update("withdrawn_at", now).Error; err != nil {
-			return err
-		}
-		return model.CreatePromotionEventTx(tx, &model.PromotionEvent{
-			UserId:          withdrawal.UserId,
-			EventType:       model.PromotionEventTypeCommissionWithdrawPaid,
-			SourceTable:     model.PromotionEventSourceWithdrawal,
-			SourceId:        withdrawal.Id,
-			Direction:       model.PromotionEventDirectionOutcome,
-			CashAmountCents: -withdrawal.NetAmountCents,
-			Currency:        withdrawal.Currency,
-			Status:          withdrawal.Status,
-			Title:           "Cash withdrawal paid",
-			Remark:          req.ReviewNote,
-			CreatedAt:       withdrawal.PaidAt,
-		})
+		return nil
 	})
 	return withdrawal, err
 }
 
 func updatePromotionWithdrawalReviewTx(tx *gorm.DB, id int, reviewerId int, status string, tradeNo string, note string, allowedStatuses []string) (*model.PromotionWithdrawal, error) {
-	if id <= 0 {
+	if id <= 0 || reviewerId <= 0 {
 		return nil, errors.New("invalid withdrawal")
 	}
 	now := common.GetTimestamp()
+	tradeNo = strings.TrimSpace(tradeNo)
+	note = strings.TrimSpace(note)
+	current, err := model.LockPromotionWithdrawalTx(tx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("withdrawal status does not allow this operation")
+		}
+		return nil, err
+	}
+	if len(allowedStatuses) > 0 {
+		allowed := false
+		for _, allowedStatus := range allowedStatuses {
+			if current.Status == allowedStatus {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, errors.New("withdrawal status does not allow this operation")
+		}
+	}
+
 	updates := map[string]interface{}{
 		"status":      status,
 		"reviewer_id": reviewerId,
-		"review_note": strings.TrimSpace(note),
-		"reviewed_at": now,
+		"review_note": note,
 	}
-	if strings.TrimSpace(tradeNo) != "" {
-		updates["trade_no"] = strings.TrimSpace(tradeNo)
-	}
-	if status == model.PromotionWithdrawalStatusPaid {
+	action := ""
+	externalReference := ""
+	switch status {
+	case model.PromotionWithdrawalStatusApproved:
+		updates["reviewed_at"] = now
+		action = model.PromotionWithdrawalActionApproved
+	case model.PromotionWithdrawalStatusProcessing:
+		if tradeNo == "" {
+			return nil, model.ErrPromotionWithdrawalPayoutReferenceRequired
+		}
+		updates["trade_no"] = tradeNo
+		updates["payout_initiated_at"] = now
+		action = model.PromotionWithdrawalActionPayoutInitiated
+		externalReference = tradeNo
+	case model.PromotionWithdrawalStatusRejected:
+		updates["reviewed_at"] = now
+		action = model.PromotionWithdrawalActionRejected
+	case model.PromotionWithdrawalStatusFailed:
+		if current.TradeNo == "" || tradeNo == "" {
+			return nil, model.ErrPromotionWithdrawalPayoutReferenceRequired
+		}
+		if !strings.EqualFold(tradeNo, current.TradeNo) {
+			return nil, model.ErrPromotionWithdrawalPayoutReferenceConflict
+		}
+		if note == "" {
+			return nil, model.ErrPromotionWithdrawalFailureReasonRequired
+		}
+		updates["reviewed_at"] = now
+		action = model.PromotionWithdrawalActionPayoutFailed
+		externalReference = current.TradeNo
+	case model.PromotionWithdrawalStatusPaid:
+		if current.TradeNo == "" {
+			return nil, model.ErrPromotionWithdrawalPayoutReferenceRequired
+		}
+		if tradeNo != "" && !strings.EqualFold(tradeNo, current.TradeNo) {
+			return nil, errors.New("payout reference does not match the initiated payout")
+		}
 		updates["paid_at"] = now
+		action = model.PromotionWithdrawalActionPaid
+		externalReference = current.TradeNo
+	default:
+		return nil, errors.New("invalid withdrawal status transition")
 	}
-	query := tx.Model(&model.PromotionWithdrawal{}).Where("id = ?", id)
-	if len(allowedStatuses) > 0 {
-		query = query.Where("status IN ?", allowedStatuses)
+
+	// Keep the shared refund/withdrawal lock order stable: withdrawal, all
+	// attached commission ledgers, then the actor and owner user rows. The
+	// operation writer validates and locks both users after this check.
+	switch status {
+	case model.PromotionWithdrawalStatusApproved, model.PromotionWithdrawalStatusProcessing:
+		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, current.Id); err != nil {
+			return nil, err
+		}
+	case model.PromotionWithdrawalStatusRejected, model.PromotionWithdrawalStatusFailed:
+		if err := model.ValidatePromotionWithdrawalLedgerIntegrityTx(tx, current.Id); err != nil {
+			return nil, err
+		}
+	case model.PromotionWithdrawalStatusPaid:
+		paidJournalExists, err := model.ValidatePromotionWithdrawalPaidTransactionTx(tx, current)
+		if err != nil {
+			return nil, err
+		}
+		if !paidJournalExists {
+			if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, current.Id); err != nil {
+				return nil, err
+			}
+		}
 	}
-	res := query.Updates(updates)
+	res := tx.Model(&model.PromotionWithdrawal{}).
+		Where("id = ? AND status = ?", current.Id, current.Status).
+		Updates(updates)
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -503,6 +916,17 @@ func updatePromotionWithdrawalReviewTx(tx *gorm.DB, id int, reviewerId int, stat
 	if err := tx.Where("id = ?", id).First(&withdrawal).Error; err != nil {
 		return nil, err
 	}
+	if err := model.CreatePromotionWithdrawalOperationTx(tx, &model.PromotionWithdrawalOperation{
+		WithdrawalId:      withdrawal.Id,
+		Action:            action,
+		ActorType:         model.PromotionWithdrawalActorAdmin,
+		ActorId:           reviewerId,
+		Note:              withdrawal.ReviewNote,
+		ExternalReference: externalReference,
+		CreatedAt:         now,
+	}); err != nil {
+		return nil, err
+	}
 	return &withdrawal, nil
 }
 
@@ -510,16 +934,26 @@ func releasePromotionWithdrawalLedgersTx(tx *gorm.DB, withdrawalId int, targetSt
 	if withdrawalId <= 0 || targetStatus == "" {
 		return nil
 	}
+	if targetStatus != model.PromotionCommissionStatusSettled && targetStatus != model.PromotionCommissionStatusWithdrawn {
+		return errors.New("invalid withdrawal ledger target status")
+	}
+	if targetStatus == model.PromotionCommissionStatusWithdrawn {
+		if err := model.ValidatePromotionWithdrawalLedgersPayableTx(tx, withdrawalId); err != nil {
+			return err
+		}
+	} else if err := model.ValidatePromotionWithdrawalLedgerIntegrityTx(tx, withdrawalId); err != nil {
+		return err
+	}
 	updates := map[string]interface{}{"status": targetStatus}
 	sourceStatus := model.PromotionCommissionStatusWithdrawing
 	if targetStatus == model.PromotionCommissionStatusWithdrawn {
 		updates["withdrawn_at"] = common.GetTimestamp()
 	}
-	var itemCount int64
-	if err := tx.Model(&model.PromotionWithdrawalItem{}).Where("withdrawal_id = ?", withdrawalId).Count(&itemCount).Error; err != nil {
+	var items []model.PromotionWithdrawalItem
+	if err := tx.Where("withdrawal_id = ?", withdrawalId).Order("id ASC").Find(&items).Error; err != nil {
 		return err
 	}
-	if itemCount == 0 {
+	if len(items) == 0 {
 		return model.ErrPromotionWithdrawalLedgerNotPayable
 	}
 	result := tx.Model(&model.PromotionCommissionLedger{}).
@@ -528,10 +962,68 @@ func releasePromotionWithdrawalLedgersTx(tx *gorm.DB, withdrawalId int, targetSt
 	if result.Error != nil {
 		return result.Error
 	}
-	if result.RowsAffected != itemCount {
+	if result.RowsAffected != int64(len(items)) {
 		return model.ErrPromotionWithdrawalLedgerNotPayable
 	}
-	return nil
+
+	var withdrawal model.PromotionWithdrawal
+	if err := tx.Where("id = ?", withdrawalId).First(&withdrawal).Error; err != nil {
+		return err
+	}
+	transactionKey := fmt.Sprintf("withdrawal:%d:released", withdrawal.Id)
+	kind := model.PromotionFundKindCommissionWithdrawalReleased
+	occurredAt := withdrawal.ReviewedAt
+	legs := make([]model.PromotionFundTransactionLeg, 0, len(items)*2)
+	if targetStatus == model.PromotionCommissionStatusWithdrawn {
+		transactionKey = fmt.Sprintf("withdrawal:%d:paid", withdrawal.Id)
+		kind = model.PromotionFundKindCommissionWithdrawalPaid
+		occurredAt = withdrawal.PaidAt
+		legs = make([]model.PromotionFundTransactionLeg, 0, len(items))
+	}
+	for _, item := range items {
+		if item.AmountCents <= 0 {
+			return model.ErrPromotionWithdrawalLedgerNotPayable
+		}
+		legs = append(legs, model.PromotionFundTransactionLeg{
+			Account: model.PromotionFundAccountCommissionReserved, Asset: model.PromotionFundAssetCash,
+			Currency: withdrawal.Currency, Amount: -item.AmountCents,
+			SourceType: "promotion_commission_ledgers", SourceId: item.LedgerId,
+		})
+		if targetStatus == model.PromotionCommissionStatusSettled {
+			legs = append(legs, model.PromotionFundTransactionLeg{
+				Account: model.PromotionFundAccountCommissionAvailable, Asset: model.PromotionFundAssetCash,
+				Currency: withdrawal.Currency, Amount: item.AmountCents,
+				SourceType: "promotion_commission_ledgers", SourceId: item.LedgerId,
+			})
+		}
+	}
+	transaction := &model.PromotionFundTransaction{
+		TransactionKey: transactionKey,
+		Kind:           kind,
+		UserId:         withdrawal.UserId,
+		SourceType:     "promotion_withdrawals",
+		SourceId:       withdrawal.Id,
+		SourceKey:      fmt.Sprintf("promotion_withdrawals:%d", withdrawal.Id),
+		ActorType:      "admin",
+		ActorId:        withdrawal.ReviewerId,
+		ExternalRef:    withdrawal.TradeNo,
+		Remark:         withdrawal.ReviewNote,
+		OccurredAt:     occurredAt,
+	}
+	if targetStatus == model.PromotionCommissionStatusSettled {
+		var reserve model.PromotionFundTransaction
+		reserveErr := tx.Select("id").Where("transaction_key = ?", fmt.Sprintf("withdrawal:%d:reserved", withdrawal.Id)).First(&reserve).Error
+		if errors.Is(reserveErr, gorm.ErrRecordNotFound) {
+			reserveErr = tx.Select("id").Where("transaction_key = ?", fmt.Sprintf("pfb:promotion_withdrawals:%d:reserved", withdrawal.Id)).First(&reserve).Error
+		}
+		if reserveErr != nil && !errors.Is(reserveErr, gorm.ErrRecordNotFound) {
+			return reserveErr
+		}
+		if reserveErr == nil {
+			transaction.ReversesTransactionId = reserve.Id
+		}
+	}
+	return model.CreatePromotionFundTransactionTx(tx, transaction, legs)
 }
 
 func ListGrowthRewardItemsForUser(userId int) ([]*GrowthRewardItemStatus, error) {
@@ -594,6 +1086,9 @@ func ListGrowthRewardItemsForUser(userId int) ([]*GrowthRewardItemStatus, error)
 
 func shouldHideGrowthRewardItem(item *model.GrowthRewardItem, growthSetting *operation_setting.GrowthSetting) bool {
 	if item == nil || !item.Enabled {
+		return true
+	}
+	if item.Code == model.GrowthRewardItemJoinCommunity && strings.TrimSpace(item.ClaimPassword) == "" {
 		return true
 	}
 	if item.Code == model.GrowthRewardItemDailyCheckin {
@@ -673,8 +1168,36 @@ func ListGrowthRewards(userId int, pageInfo *common.PageInfo) ([]*model.GrowthRe
 	return model.ListGrowthRewards(userId, pageInfo)
 }
 
-func ListPromotionEvents(userId int, pageInfo *common.PageInfo) ([]*model.PromotionEvent, int64, error) {
-	return model.ListPromotionEvents(userId, pageInfo)
+type UserPromotionEventRecord struct {
+	EventType       string `json:"event_type"`
+	Direction       string `json:"direction"`
+	QuotaDelta      int    `json:"quota_delta"`
+	CashAmountCents int64  `json:"cash_amount_cents"`
+	Currency        string `json:"currency"`
+	Status          string `json:"status"`
+	Title           string `json:"title"`
+	CreatedAt       int64  `json:"created_at"`
+}
+
+func ListPromotionEvents(userId int, pageInfo *common.PageInfo) ([]*UserPromotionEventRecord, int64, error) {
+	events, total, err := model.ListPromotionEvents(userId, pageInfo)
+	if err != nil {
+		return nil, 0, err
+	}
+	records := make([]*UserPromotionEventRecord, 0, len(events))
+	for _, event := range events {
+		records = append(records, &UserPromotionEventRecord{
+			EventType:       event.EventType,
+			Direction:       event.Direction,
+			QuotaDelta:      event.QuotaDelta,
+			CashAmountCents: event.CashAmountCents,
+			Currency:        event.Currency,
+			Status:          event.Status,
+			Title:           event.Title,
+			CreatedAt:       event.CreatedAt,
+		})
+	}
+	return records, total, nil
 }
 
 func CreateGrowthSubmission(userId int, req GrowthSubmissionRequest) (*model.GrowthSubmission, error) {
@@ -778,8 +1301,12 @@ func ApproveGrowthSubmission(id int, reviewerId int, req GrowthReviewRequest) (*
 	}
 	now := time.Now().Unix()
 	err = model.DB.Transaction(func(tx *gorm.DB) error {
-		if err := lockUserForRewardTx(tx, submission.UserId); err != nil {
+		lockedUsers, err := model.LockActiveUsersForFinancialWriteTx(tx, reviewerId, submission.UserId)
+		if err != nil {
 			return err
+		}
+		if actor := lockedUsers[reviewerId]; actor.Role != common.RoleAdminUser && actor.Role != common.RoleRootUser {
+			return errors.New("growth submission review requires an administrator")
 		}
 		if err := checkRewardBudgetTx(tx, submission.UserId, rewardQuota); err != nil {
 			return err
@@ -833,6 +1360,13 @@ func RejectGrowthSubmission(id int, reviewerId int, note string) (*model.GrowthS
 	}
 	now := time.Now().Unix()
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		lockedUsers, err := model.LockActiveUsersForFinancialWriteTx(tx, reviewerId)
+		if err != nil {
+			return err
+		}
+		if actor := lockedUsers[reviewerId]; actor.Role != common.RoleAdminUser && actor.Role != common.RoleRootUser {
+			return errors.New("growth submission review requires an administrator")
+		}
 		result := tx.Model(&model.GrowthSubmission{}).
 			Where("id = ? AND status = ?", id, model.GrowthSubmissionStatusPending).
 			Updates(map[string]interface{}{
@@ -1040,7 +1574,7 @@ func canClaimAutoRewardItem(userId int, item *model.GrowthRewardItem) (bool, str
 	case model.GrowthRewardItemFirstTopUp:
 		var count int64
 		err := model.DB.Model(&model.TopUp{}).
-			Where("user_id = ? AND status = ?", userId, common.TopUpStatusSuccess).
+			Where("user_id = ? AND purpose = ? AND status = ?", userId, model.TopUpPurposeAPIBalance, common.TopUpStatusSuccess).
 			Where("refund_status IS NULL OR refund_status NOT IN ?", []string{model.TopUpRefundStatusFull, model.TopUpRefundStatusDisputed}).
 			Count(&count).Error
 		return count > 0, "Complete your first top-up first", err
@@ -1062,8 +1596,11 @@ func canClaimAutoRewardItem(userId int, item *model.GrowthRewardItem) (bool, str
 }
 
 func validateGrowthRewardClaimPassword(item *model.GrowthRewardItem, password string) error {
-	if item.Code != model.GrowthRewardItemJoinCommunity || item.ClaimPassword == "" {
+	if item.Code != model.GrowthRewardItemJoinCommunity {
 		return nil
+	}
+	if strings.TrimSpace(item.ClaimPassword) == "" {
+		return errors.New("reward item is not configured")
 	}
 	if strings.TrimSpace(password) != strings.TrimSpace(item.ClaimPassword) {
 		return errors.New("Invalid task password")

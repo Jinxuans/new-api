@@ -36,7 +36,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { formatCashCents } from '@/features/promotion/shared'
+import { formatMinorAmount } from '@/lib/currency'
 import { formatQuota } from '@/lib/format'
 
 import type { PromotionEarnings } from '../api'
@@ -56,14 +56,18 @@ export function EarningsBalances(props: EarningsBalancesProps) {
       <Card data-card-hover='false'>
         <CardHeader>
           <CardTitle className='flex items-center gap-2'>
-            <HugeiconsIcon icon={Task01Icon} strokeWidth={2} />
+            <HugeiconsIcon
+              icon={Task01Icon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
             {t('Task rewards')}
           </CardTitle>
           <CardDescription>
             {t('Approved task rewards go directly to your API balance.')}
           </CardDescription>
         </CardHeader>
-        <CardContent className='space-y-3'>
+        <CardContent className='flex flex-col gap-3'>
           <div>
             <div className='text-muted-foreground text-xs'>
               {t('Total earned')}
@@ -83,7 +87,11 @@ export function EarningsBalances(props: EarningsBalancesProps) {
       <Card data-card-hover='false'>
         <CardHeader>
           <CardTitle className='flex items-center gap-2'>
-            <HugeiconsIcon icon={AffiliateIcon} strokeWidth={2} />
+            <HugeiconsIcon
+              icon={AffiliateIcon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
             {t('Referral credit')}
           </CardTitle>
           <CardDescription>
@@ -92,7 +100,7 @@ export function EarningsBalances(props: EarningsBalancesProps) {
             )}
           </CardDescription>
         </CardHeader>
-        <CardContent className='space-y-3'>
+        <CardContent className='flex flex-col gap-3'>
           <div>
             <div className='text-muted-foreground text-xs'>
               {t('Available now')}
@@ -108,7 +116,11 @@ export function EarningsBalances(props: EarningsBalancesProps) {
               })}
             </Badge>
             <Badge variant='outline' className='gap-1'>
-              <HugeiconsIcon icon={UserMultipleIcon} strokeWidth={2} />
+              <HugeiconsIcon
+                icon={UserMultipleIcon}
+                strokeWidth={2}
+                aria-hidden='true'
+              />
               {t('{{count}} invited users', { count: earnings.invitedUsers })}
             </Badge>
           </div>
@@ -119,7 +131,12 @@ export function EarningsBalances(props: EarningsBalancesProps) {
             disabled={earnings.transferableReferralCredit <= 0}
             onClick={props.onTransferReferral}
           >
-            <HugeiconsIcon icon={Wallet01Icon} strokeWidth={2} />
+            <HugeiconsIcon
+              icon={Wallet01Icon}
+              strokeWidth={2}
+              data-icon='inline-start'
+              aria-hidden='true'
+            />
             {t('Transfer all referral credit')}
           </Button>
         </CardContent>
@@ -128,20 +145,24 @@ export function EarningsBalances(props: EarningsBalancesProps) {
       <Card data-card-hover='false'>
         <CardHeader>
           <CardTitle className='flex items-center gap-2'>
-            <HugeiconsIcon icon={Cash01Icon} strokeWidth={2} />
+            <HugeiconsIcon
+              icon={Cash01Icon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
             {t('Cash commission')}
           </CardTitle>
           <CardDescription>
             {t('Settled cash can be converted to API balance or withdrawn.')}
           </CardDescription>
         </CardHeader>
-        <CardContent className='space-y-3'>
+        <CardContent className='flex flex-col gap-3'>
           <div>
             <div className='text-muted-foreground text-xs'>
               {t('Available now')}
             </div>
             <div className='mt-1 text-2xl font-semibold tabular-nums'>
-              {formatCashCents(
+              {formatMinorAmount(
                 earnings.withdrawableCashCents,
                 earnings.cashCurrency
               )}
@@ -155,7 +176,7 @@ export function EarningsBalances(props: EarningsBalancesProps) {
           <div className='flex flex-wrap gap-2'>
             <Badge variant='secondary'>
               {t('{{amount}} pending settlement', {
-                amount: formatCashCents(
+                amount: formatMinorAmount(
                   earnings.pendingCashCents,
                   earnings.cashCurrency
                 ),
@@ -164,7 +185,7 @@ export function EarningsBalances(props: EarningsBalancesProps) {
             {earnings.withdrawingCashCents > 0 ? (
               <Badge variant='outline'>
                 {t('{{amount}} under withdrawal review', {
-                  amount: formatCashCents(
+                  amount: formatMinorAmount(
                     earnings.withdrawingCashCents,
                     earnings.cashCurrency
                   ),
@@ -179,7 +200,12 @@ export function EarningsBalances(props: EarningsBalancesProps) {
               disabled={earnings.withdrawableCashCents <= 0}
               onClick={props.onConvertCash}
             >
-              <HugeiconsIcon icon={Wallet01Icon} strokeWidth={2} />
+              <HugeiconsIcon
+                icon={Wallet01Icon}
+                strokeWidth={2}
+                data-icon='inline-start'
+                aria-hidden='true'
+              />
               {t('Convert all to balance')}
             </Button>
             <Button
@@ -188,7 +214,12 @@ export function EarningsBalances(props: EarningsBalancesProps) {
               disabled={earnings.withdrawableCashCents <= 0}
               onClick={props.onWithdrawCash}
             >
-              <HugeiconsIcon icon={BankIcon} strokeWidth={2} />
+              <HugeiconsIcon
+                icon={BankIcon}
+                strokeWidth={2}
+                data-icon='inline-start'
+                aria-hidden='true'
+              />
               {t('Withdraw all cash')}
             </Button>
           </div>

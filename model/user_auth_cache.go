@@ -66,34 +66,47 @@ local current = tonumber(redis.call('HGET', KEYS[1], 'AuthVersion') or '0')
 if pending > incoming or committed > incoming or current > incoming then
   return 0
 end
+if redis.call('EXISTS', KEYS[4]) > 0 then
+  return -1
+end
 if committed < incoming then
   redis.call('SET', KEYS[3], ARGV[1])
 end
 if pending > 0 and pending <= incoming then
   redis.call('DEL', KEYS[2])
 end
-if ARGV[10] == '0' and redis.call('EXISTS', KEYS[1]) == 0 then
+if ARGV[10] == '0' and (redis.call('EXISTS', KEYS[1]) == 0 or
+    redis.call('HEXISTS', KEYS[1], 'RefundDebtQuota') == 0 or
+    redis.call('HEXISTS', KEYS[1], 'RefundHold') == 0) then
   return 1
 end
 redis.call('HSET', KEYS[1],
   'Id', ARGV[2], 'Group', ARGV[3], 'Email', ARGV[4],
   'Status', ARGV[5], 'Role', ARGV[6], 'Username', ARGV[7],
   'Setting', ARGV[8], 'AuthVersion', ARGV[1], 'CacheSchema', ARGV[9])
-if ARGV[10] == '1' and redis.call('HEXISTS', KEYS[1], 'Quota') == 0 then
-  redis.call('HSET', KEYS[1], 'Quota', ARGV[11])
+if ARGV[10] == '1' then
+  if redis.call('HEXISTS', KEYS[1], 'Quota') == 0 then
+    redis.call('HSET', KEYS[1], 'Quota', ARGV[11])
+  end
+  redis.call('HSET', KEYS[1],
+    'RefundDebtQuota', ARGV[12], 'RefundHold', ARGV[13])
 end
-redis.call('EXPIRE', KEYS[1], ARGV[12])
+redis.call('EXPIRE', KEYS[1], ARGV[14])
 return 1`
 	result, err := common.RDB.Eval(context.Background(), script,
-		[]string{getUserCacheKey(user.Id), getUserAuthFenceKey(user.Id), getUserAuthVersionKey(user.Id)},
+		[]string{getUserCacheKey(user.Id), getUserAuthFenceKey(user.Id), getUserAuthVersionKey(user.Id), userRefundHoldKey(user.Id)},
 		user.AuthVersion, user.Id, user.Group, user.Email, user.Status, user.Role,
-		user.Username, user.Setting, user.CacheSchema, includeQuotaArg, user.Quota, ttl,
+		user.Username, user.Setting, user.CacheSchema, includeQuotaArg, user.Quota,
+		user.RefundDebtQuota, user.RefundHold, ttl,
 	).Int()
 	if err != nil {
 		return err
 	}
 	if result == 0 {
 		return ErrUserAuthCachePending
+	}
+	if result == -1 {
+		return ErrUserRefundHeld
 	}
 	return nil
 }

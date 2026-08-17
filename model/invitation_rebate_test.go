@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -297,6 +298,78 @@ func TestSyncInvitationRebatesForInviter_BackfillsOnlyOnceWithoutCashLedger(t *t
 	assert.Zero(t, ledgerCount)
 }
 
+func TestSyncInvitationRebatesForInviter_DoesNotBackfillCommissionAfterPartialRefund(t *testing.T) {
+	truncateTables(t)
+	setInvitationRebateFreezeDaysForTest(t, 0)
+	setInvitationRebatePercentageForTest(t, 10)
+
+	const (
+		inviterID = 611
+		inviteeID = 612
+	)
+	insertInviterAndInviteeForRebateTest(t, inviterID, inviteeID)
+	t.Cleanup(func() {
+		for _, userID := range []int{inviterID, inviteeID} {
+			_ = DB.Model(&User{}).Where("id = ?", userID).Update("refund_hold", false).Error
+			_ = ClearUserRefundHoldFence(userID)
+		}
+	})
+
+	topUp := &TopUp{
+		UserId:             inviteeID,
+		Purpose:            TopUpPurposeAPIBalance,
+		Amount:             10,
+		Money:              10,
+		CreditedQuota:      1000,
+		PaidAmountMinor:    1000,
+		PaidCurrency:       "CNY",
+		PaidAmountVerified: true,
+		TradeNo:            "rebate-partial-refund-before-backfill",
+		PaymentMethod:      "alipay",
+		PaymentProvider:    PaymentProviderEpay,
+		CreateTime:         time.Now().Unix(),
+		CompleteTime:       time.Now().Unix(),
+		Status:             common.TopUpStatusSuccess,
+	}
+	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", inviteeID).Update("quota", topUp.CreditedQuota).Error)
+
+	refundCase, err := HandlePromotionRefund(PromotionRefundInput{
+		Provider:            PaymentProviderEpay,
+		TradeNo:             topUp.TradeNo,
+		RefundTradeNo:       "rebate-partial-refund-before-backfill-1",
+		Kind:                PromotionRefundKindPartial,
+		PaidAmountMinor:     topUp.PaidAmountMinor,
+		RefundedAmountMinor: 100,
+		Currency:            topUp.PaidCurrency,
+	})
+	require.NoError(t, err)
+	require.Equal(t, PromotionRefundCaseStatusResolved, refundCase.Status)
+	require.NotEmpty(t, refundCase.ResponsibilityFingerprint)
+	require.NoError(t, DB.Where("id = ?", topUp.Id).First(topUp).Error)
+	require.Equal(t, TopUpRefundStatusPartial, topUp.RefundStatus)
+	rebate, err := SettleInvitationRebateTx(DB, topUp)
+	require.NoError(t, err)
+	require.Nil(t, rebate)
+	require.Zero(t, getInvitationRebateCountForTest(t, inviterID))
+
+	require.NoError(t, SyncInvitationRebatesForInviter(inviterID))
+	require.NoError(t, SyncInvitationRebatesForInviter(inviterID))
+
+	assert.Zero(t, getInvitationRebateCountForTest(t, inviterID))
+	var ledgerCount int64
+	require.NoError(t, DB.Model(&PromotionCommissionLedger{}).Where("user_id = ?", inviterID).Count(&ledgerCount).Error)
+	assert.Zero(t, ledgerCount)
+	require.NoError(t, DB.Where("id = ?", refundCase.Id).First(refundCase).Error)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, refundCase.Status)
+	assert.False(t, refundCase.RequiresRootReview)
+	for _, userID := range []int{inviterID, inviteeID} {
+		var user User
+		require.NoError(t, DB.Select("id", "refund_hold").Where("id = ?", userID).First(&user).Error)
+		assert.False(t, user.RefundHold)
+	}
+}
+
 func TestReverseInvitationRebate_TransferredCashCommissionDeductsQuota(t *testing.T) {
 	truncateTables(t)
 	setInvitationRebateFreezeDaysForTest(t, 0)
@@ -451,10 +524,13 @@ func TestHandlePromotionRefund_FullRefundReversesPromotionRewardsOnce(t *testing
 	operation_setting.USDExchangeRate = 7.3
 
 	insertInviterAndInviteeForRebateTest(t, 681, 682)
+	const creditedQuota = 1000
 	topUp := &TopUp{
 		UserId:             682,
+		Purpose:            TopUpPurposeAPIBalance,
 		Amount:             10,
 		Money:              10,
+		CreditedQuota:      creditedQuota,
 		PaidAmountMinor:    7300,
 		PaidCurrency:       "CNY",
 		PaidAmountVerified: true,
@@ -466,6 +542,7 @@ func TestHandlePromotionRefund_FullRefundReversesPromotionRewardsOnce(t *testing
 		Status:             common.TopUpStatusSuccess,
 	}
 	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 682).Update("quota", creditedQuota).Error)
 	rebate, err := SettleInvitationRebateTx(DB, topUp)
 	require.NoError(t, err)
 	require.NotNil(t, rebate)
@@ -525,13 +602,15 @@ func TestHandlePromotionRefund_FullRefundReversesPromotionRewardsOnce(t *testing
 	assert.Zero(t, inviter.Quota)
 }
 
-func TestHandlePromotionRefund_PartialRefundCreatesOnePendingReviewCase(t *testing.T) {
+func TestHandlePromotionRefund_PartialRefundRecoversProportionalQuotaOnce(t *testing.T) {
 	truncateTables(t)
 	insertUserForPaymentGuardTest(t, 691, 0)
 	topUp := &TopUp{
 		UserId:             691,
+		Purpose:            TopUpPurposeAPIBalance,
 		Amount:             10,
 		Money:              10,
+		CreditedQuota:      1000,
 		PaidAmountMinor:    1000,
 		PaidCurrency:       "USD",
 		PaidAmountVerified: true,
@@ -543,6 +622,7 @@ func TestHandlePromotionRefund_PartialRefundCreatesOnePendingReviewCase(t *testi
 		Status:             common.TopUpStatusSuccess,
 	}
 	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 691).Update("quota", 1000).Error)
 	input := PromotionRefundInput{
 		Provider:            PaymentProviderStripe,
 		TradeNo:             topUp.TradeNo,
@@ -557,12 +637,77 @@ func TestHandlePromotionRefund_PartialRefundCreatesOnePendingReviewCase(t *testi
 	second, err := HandlePromotionRefund(input)
 	require.NoError(t, err)
 	assert.Equal(t, first.Id, second.Id)
-	assert.Equal(t, PromotionRefundCaseStatusPendingReview, first.Status)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, first.Status)
 	var count int64
 	require.NoError(t, DB.Model(&PromotionRefundCase{}).Where("trade_no = ?", topUp.TradeNo).Count(&count).Error)
 	assert.Equal(t, int64(1), count)
 	require.NoError(t, DB.Where("id = ?", topUp.Id).First(topUp).Error)
 	assert.Equal(t, TopUpRefundStatusPartial, topUp.RefundStatus)
+}
+
+func TestHandlePromotionRefund_CumulativePartialsReverseFixedRewardAtFullAmount(t *testing.T) {
+	truncateTables(t)
+	insertUserForPaymentGuardTest(t, 693, 1000)
+	topUp := &TopUp{
+		UserId:             693,
+		Purpose:            TopUpPurposeAPIBalance,
+		Amount:             10,
+		Money:              10,
+		CreditedQuota:      1000,
+		PaidAmountMinor:    1000,
+		PaidCurrency:       "USD",
+		PaidAmountVerified: true,
+		TradeNo:            "refund-cumulative-partials",
+		PaymentMethod:      PaymentMethodStripe,
+		PaymentProvider:    PaymentProviderStripe,
+		CreateTime:         time.Now().Unix(),
+		CompleteTime:       time.Now().Unix(),
+		Status:             common.TopUpStatusSuccess,
+	}
+	require.NoError(t, topUp.Insert())
+
+	claimKey := "693:first_topup:cumulative-refund"
+	reward := NewSettledGrowthReward(693, GrowthRewardItemFirstTopUp, 200, 0, "")
+	reward.ClaimKey = &claimKey
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		return CreateSettledGrowthRewardTx(tx, reward)
+	}))
+
+	first, err := HandlePromotionRefund(PromotionRefundInput{
+		Provider:            PaymentProviderStripe,
+		TradeNo:             topUp.TradeNo,
+		RefundTradeNo:       "refund-cumulative-partials-1",
+		Kind:                PromotionRefundKindPartial,
+		PaidAmountMinor:     1000,
+		RefundedAmountMinor: 400,
+		Currency:            "USD",
+		AmountIsCumulative:  true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, first.Status)
+	require.NoError(t, DB.Where("id = ?", reward.Id).First(reward).Error)
+	assert.Equal(t, GrowthRewardStatusSettled, reward.Status)
+
+	second, err := HandlePromotionRefund(PromotionRefundInput{
+		Provider:            PaymentProviderStripe,
+		TradeNo:             topUp.TradeNo,
+		RefundTradeNo:       "refund-cumulative-partials-2",
+		Kind:                PromotionRefundKindPartial,
+		PaidAmountMinor:     1000,
+		RefundedAmountMinor: 1000,
+		Currency:            "USD",
+		AmountIsCumulative:  true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, second.Status)
+	require.NoError(t, DB.Where("id = ?", reward.Id).First(reward).Error)
+	assert.Equal(t, GrowthRewardStatusReversed, reward.Status)
+	require.NoError(t, DB.Where("id = ?", topUp.Id).First(topUp).Error)
+	assert.Equal(t, TopUpRefundStatusFull, topUp.RefundStatus)
+	assert.Equal(t, 1000, topUp.RefundedQuota)
+	var user User
+	require.NoError(t, DB.Where("id = ?", 693).First(&user).Error)
+	assert.Zero(t, user.Quota)
 }
 
 func TestPromotionCommissionSettledEventRecordsCashWithoutQuotaIncome(t *testing.T) {
@@ -603,8 +748,10 @@ func TestHandlePromotionRefund_PartialRefundImmediatelyInvalidatesSettledCommiss
 	insertInviterAndInviteeForRebateTest(t, 7011, 7012)
 	topUp := &TopUp{
 		UserId:             7012,
+		Purpose:            TopUpPurposeAPIBalance,
 		Amount:             10,
 		Money:              10,
+		CreditedQuota:      1000,
 		PaidAmountMinor:    1000,
 		PaidCurrency:       "CNY",
 		PaidAmountVerified: true,
@@ -616,6 +763,7 @@ func TestHandlePromotionRefund_PartialRefundImmediatelyInvalidatesSettledCommiss
 		Status:             common.TopUpStatusSuccess,
 	}
 	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 7012).Update("quota", 1000).Error)
 	rebate, err := SettleInvitationRebateTx(DB, topUp)
 	require.NoError(t, err)
 	require.NotNil(t, rebate)
@@ -632,7 +780,7 @@ func TestHandlePromotionRefund_PartialRefundImmediatelyInvalidatesSettledCommiss
 		Currency:            "CNY",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, PromotionRefundCaseStatusPendingReview, refundCase.Status)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, refundCase.Status)
 	require.NoError(t, DB.Where("id = ?", rebate.Id).First(rebate).Error)
 	assert.Equal(t, InvitationRebateStatusReversed, rebate.Status)
 	require.NoError(t, DB.Where("id = ?", ledger.Id).First(&ledger).Error)
@@ -643,15 +791,17 @@ func TestHandlePromotionRefund_PartialRefundImmediatelyInvalidatesSettledCommiss
 	assert.Empty(t, ledgers)
 }
 
-func TestHandlePromotionRefund_WithdrawingCommissionStaysPendingReview(t *testing.T) {
+func TestHandlePromotionRefund_WithdrawingCommissionCancelsUnpaidWithdrawal(t *testing.T) {
 	truncateTables(t)
 	setInvitationRebateFreezeDaysForTest(t, 0)
 	setInvitationRebatePercentageForTest(t, 10)
 	insertInviterAndInviteeForRebateTest(t, 711, 712)
 	topUp := &TopUp{
 		UserId:             712,
+		Purpose:            TopUpPurposeAPIBalance,
 		Amount:             10,
 		Money:              10,
+		CreditedQuota:      1000,
 		PaidAmountMinor:    1000,
 		PaidCurrency:       "CNY",
 		PaidAmountVerified: true,
@@ -663,11 +813,48 @@ func TestHandlePromotionRefund_WithdrawingCommissionStaysPendingReview(t *testin
 		Status:             common.TopUpStatusSuccess,
 	}
 	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 712).Update("quota", 1000).Error)
 	rebate, err := SettleInvitationRebateTx(DB, topUp)
 	require.NoError(t, err)
 	require.NotNil(t, rebate)
 	ledger := getPromotionCommissionLedgerForTest(t, 711)
 	require.NoError(t, DB.Model(&PromotionCommissionLedger{}).Where("id = ?", ledger.Id).Update("status", PromotionCommissionStatusWithdrawing).Error)
+	otherLedger := &PromotionCommissionLedger{
+		UserId: 711, SourceType: "test_commission", SourceId: 1, Cashable: true,
+		Currency: "CNY", GrossAmountCents: 50, NetAmountCents: 50,
+		Status: PromotionCommissionStatusWithdrawing,
+	}
+	require.NoError(t, DB.Create(otherLedger).Error)
+	withdrawal := &PromotionWithdrawal{
+		UserId:           711,
+		Currency:         ledger.Currency,
+		GrossAmountCents: ledger.NetAmountCents + otherLedger.NetAmountCents,
+		NetAmountCents:   ledger.NetAmountCents + otherLedger.NetAmountCents,
+		Status:           PromotionWithdrawalStatusPendingReview,
+		PayoutMethod:     "alipay",
+	}
+	require.NoError(t, DB.Create(withdrawal).Error)
+	ensureFinancialActorTestUser(t, 91, common.RoleAdminUser)
+	require.NoError(t, DB.Create([]*PromotionWithdrawalItem{
+		{WithdrawalId: withdrawal.Id, LedgerId: ledger.Id, AmountCents: ledger.NetAmountCents},
+		{WithdrawalId: withdrawal.Id, LedgerId: otherLedger.Id, AmountCents: otherLedger.NetAmountCents},
+	}).Error)
+	reserve := &PromotionFundTransaction{
+		TransactionKey: "withdrawal:" + strconv.Itoa(withdrawal.Id) + ":reserved",
+		Kind:           PromotionFundKindCommissionWithdrawalReserved,
+		UserId:         withdrawal.UserId,
+		SourceType:     "promotion_withdrawals",
+		SourceId:       withdrawal.Id,
+		SourceKey:      "promotion_withdrawals:" + strconv.Itoa(withdrawal.Id),
+		ActorType:      "user",
+		ActorId:        withdrawal.UserId,
+	}
+	require.NoError(t, CreatePromotionFundTransactionTx(DB, reserve, []PromotionFundTransactionLeg{
+		{Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash, Currency: "CNY", Amount: -ledger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: ledger.Id},
+		{Account: PromotionFundAccountCommissionReserved, Asset: PromotionFundAssetCash, Currency: "CNY", Amount: ledger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: ledger.Id},
+		{Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash, Currency: "CNY", Amount: -otherLedger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: otherLedger.Id},
+		{Account: PromotionFundAccountCommissionReserved, Asset: PromotionFundAssetCash, Currency: "CNY", Amount: otherLedger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: otherLedger.Id},
+	}))
 
 	refundCase, err := HandlePromotionRefund(PromotionRefundInput{
 		Provider:            PaymentProviderEpay,
@@ -679,24 +866,248 @@ func TestHandlePromotionRefund_WithdrawingCommissionStaysPendingReview(t *testin
 		Currency:            "CNY",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, PromotionRefundCaseStatusPendingReview, refundCase.Status)
-	assert.Contains(t, refundCase.Reason, PromotionCommissionStatusWithdrawing)
+	assert.Equal(t, PromotionRefundCaseStatusResolved, refundCase.Status)
 	require.NoError(t, DB.Where("id = ?", rebate.Id).First(rebate).Error)
-	assert.Equal(t, InvitationRebateStatusSettled, rebate.Status)
+	assert.Equal(t, InvitationRebateStatusReversed, rebate.Status)
 	require.NoError(t, DB.Where("id = ?", ledger.Id).First(&ledger).Error)
-	assert.Equal(t, PromotionCommissionStatusWithdrawing, ledger.Status)
+	assert.Equal(t, PromotionCommissionStatusReversed, ledger.Status)
 	assert.False(t, ledger.Cashable)
+	require.NoError(t, DB.Where("id = ?", withdrawal.Id).First(withdrawal).Error)
+	assert.Equal(t, PromotionWithdrawalStatusFailed, withdrawal.Status)
+	require.NoError(t, DB.Where("id = ?", otherLedger.Id).First(otherLedger).Error)
+	assert.Equal(t, PromotionCommissionStatusSettled, otherLedger.Status)
+
+	var operations []PromotionWithdrawalOperation
+	require.NoError(t, DB.Where("withdrawal_id = ?", withdrawal.Id).Order("id ASC").Find(&operations).Error)
+	require.Len(t, operations, 1)
+	assert.Equal(t, PromotionWithdrawalActionCancelledByRefund, operations[0].Action)
+	assert.Equal(t, PromotionWithdrawalActorSystem, operations[0].ActorType)
+	assert.Equal(t, "refund-withdrawing-review-1", operations[0].ExternalReference)
+
+	var release PromotionFundTransaction
+	require.NoError(t, DB.Preload("Legs", func(tx *gorm.DB) *gorm.DB { return tx.Order("id ASC") }).
+		Where("transaction_key = ?", "withdrawal:"+strconv.Itoa(withdrawal.Id)+":released").
+		First(&release).Error)
+	assert.Equal(t, reserve.Id, release.ReversesTransactionId)
+	require.Len(t, release.Legs, 4)
+	assert.Equal(t, []int{ledger.Id, ledger.Id, otherLedger.Id, otherLedger.Id}, []int{
+		release.Legs[0].SourceId, release.Legs[1].SourceId, release.Legs[2].SourceId, release.Legs[3].SourceId,
+	})
 }
 
-func TestHandlePromotionRefund_TransferredCommissionWithInsufficientWalletStaysPendingReview(t *testing.T) {
+func TestHandlePromotionRefund_ProcessingWithdrawalWithoutPaidJournalCreatesWholePayoutDebt(t *testing.T) {
+	truncateTables(t)
+	setInvitationRebateFreezeDaysForTest(t, 0)
+	setInvitationRebatePercentageForTest(t, 10)
+	insertInviterAndInviteeForRebateTest(t, 713, 714)
+	ensureFinancialActorTestUser(t, 91, common.RoleAdminUser)
+	topUp := &TopUp{
+		UserId:             714,
+		Purpose:            TopUpPurposeAPIBalance,
+		Amount:             10,
+		Money:              10,
+		CreditedQuota:      1000,
+		PaidAmountMinor:    1000,
+		PaidCurrency:       "CNY",
+		PaidAmountVerified: true,
+		TradeNo:            "refund-withdrawal-processing",
+		PaymentMethod:      "alipay",
+		PaymentProvider:    PaymentProviderEpay,
+		CreateTime:         time.Now().Unix(),
+		CompleteTime:       time.Now().Unix(),
+		Status:             common.TopUpStatusSuccess,
+	}
+	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 714).Update("quota", 1000).Error)
+	rebate, err := SettleInvitationRebateTx(DB, topUp)
+	require.NoError(t, err)
+	require.NotNil(t, rebate)
+	ledger := getPromotionCommissionLedgerForTest(t, 713)
+	require.NoError(t, DB.Model(&PromotionCommissionLedger{}).Where("id = ?", ledger.Id).Update("status", PromotionCommissionStatusWithdrawing).Error)
+	otherLedger := &PromotionCommissionLedger{
+		UserId: 713, SourceType: "test_commission", SourceId: 71301, Cashable: true,
+		Currency: ledger.Currency, GrossAmountCents: 50, NetAmountCents: 50,
+		Status: PromotionCommissionStatusWithdrawing,
+	}
+	require.NoError(t, DB.Create(otherLedger).Error)
+	now := common.GetTimestamp()
+	withdrawal := &PromotionWithdrawal{
+		UserId: 713, Currency: ledger.Currency,
+		GrossAmountCents: ledger.NetAmountCents + otherLedger.NetAmountCents,
+		NetAmountCents:   ledger.NetAmountCents + otherLedger.NetAmountCents,
+		Status:           PromotionWithdrawalStatusProcessing, PayoutMethod: "bank", TradeNo: "payout-processing-713",
+		ReviewerId: 91, ReviewedAt: now - 1, PayoutInitiatedAt: now,
+	}
+	require.NoError(t, DB.Create(withdrawal).Error)
+	require.NoError(t, DB.Create([]*PromotionWithdrawalItem{
+		{WithdrawalId: withdrawal.Id, LedgerId: ledger.Id, AmountCents: ledger.NetAmountCents},
+		{WithdrawalId: withdrawal.Id, LedgerId: otherLedger.Id, AmountCents: otherLedger.NetAmountCents},
+	}).Error)
+	require.NoError(t, CreatePromotionWithdrawalOperationTx(DB, &PromotionWithdrawalOperation{
+		WithdrawalId: withdrawal.Id, Action: PromotionWithdrawalActionPayoutInitiated,
+		ActorType: PromotionWithdrawalActorAdmin, ActorId: 91,
+		ExternalReference: withdrawal.TradeNo, CreatedAt: withdrawal.PayoutInitiatedAt,
+	}))
+	require.NoError(t, CreatePromotionFundTransactionTx(DB, &PromotionFundTransaction{
+		TransactionKey: "withdrawal:" + strconv.Itoa(withdrawal.Id) + ":reserved",
+		Kind:           PromotionFundKindCommissionWithdrawalReserved,
+		UserId:         withdrawal.UserId,
+		SourceType:     "promotion_withdrawals",
+		SourceId:       withdrawal.Id,
+		SourceKey:      "promotion_withdrawals:" + strconv.Itoa(withdrawal.Id),
+		ActorType:      "user",
+		ActorId:        withdrawal.UserId,
+	}, []PromotionFundTransactionLeg{
+		{Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash, Currency: ledger.Currency, Amount: -ledger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: ledger.Id},
+		{Account: PromotionFundAccountCommissionReserved, Asset: PromotionFundAssetCash, Currency: ledger.Currency, Amount: ledger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: ledger.Id},
+		{Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash, Currency: otherLedger.Currency, Amount: -otherLedger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: otherLedger.Id},
+		{Account: PromotionFundAccountCommissionReserved, Asset: PromotionFundAssetCash, Currency: otherLedger.Currency, Amount: otherLedger.NetAmountCents, SourceType: "promotion_commission_ledgers", SourceId: otherLedger.Id},
+	}))
+
+	refundCase, err := HandlePromotionRefund(PromotionRefundInput{
+		Provider:            PaymentProviderEpay,
+		TradeNo:             topUp.TradeNo,
+		RefundTradeNo:       "refund-withdrawal-processing-1",
+		Kind:                PromotionRefundKindFull,
+		PaidAmountMinor:     1000,
+		RefundedAmountMinor: 1000,
+		Currency:            "CNY",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PromotionRefundCaseStatusPendingReview, refundCase.Status)
+	assert.Equal(t, withdrawal.NetAmountCents, refundCase.CashDebtCreatedMinor)
+	require.Len(t, refundCase.Obligations, 1)
+	obligation := refundCase.Obligations[0]
+	assert.Equal(t, withdrawal.UserId, obligation.UserId)
+	assert.Equal(t, PromotionFundAssetCash, obligation.Asset)
+	assert.Equal(t, withdrawal.Currency, obligation.Currency)
+	assert.Equal(t, withdrawal.NetAmountCents, obligation.Amount)
+	assert.Equal(t, "promotion_withdrawals", obligation.SourceType)
+	assert.Equal(t, withdrawal.Id, obligation.SourceId)
+	assert.Equal(t, PromotionRefundObligationStatusOpen, obligation.Status)
+
+	require.NoError(t, DB.Where("id = ?", ledger.Id).First(&ledger).Error)
+	assert.Equal(t, PromotionCommissionStatusReversed, ledger.Status)
+	require.NoError(t, DB.Where("id = ?", otherLedger.Id).First(otherLedger).Error)
+	assert.Equal(t, PromotionCommissionStatusSettled, otherLedger.Status)
+	require.NoError(t, DB.Where("id = ?", withdrawal.Id).First(withdrawal).Error)
+	assert.Equal(t, PromotionWithdrawalStatusFailed, withdrawal.Status)
+	assert.Contains(t, withdrawal.ReviewNote, "payout result is unknown")
+	var inviter User
+	require.NoError(t, DB.Where("id = ?", 713).First(&inviter).Error)
+	assert.True(t, inviter.RefundHold)
+
+	var payoutCount int64
+	require.NoError(t, DB.Model(&PromotionFundTransaction{}).
+		Where("transaction_key = ?", "withdrawal:"+strconv.Itoa(withdrawal.Id)+":paid").Count(&payoutCount).Error)
+	assert.Zero(t, payoutCount)
+	var release PromotionFundTransaction
+	require.NoError(t, DB.Preload("Legs", func(tx *gorm.DB) *gorm.DB { return tx.Order("id ASC") }).
+		Where("transaction_key = ?", "withdrawal:"+strconv.Itoa(withdrawal.Id)+":released").First(&release).Error)
+	require.Len(t, release.Legs, 4)
+	assert.Equal(t, PromotionFundAccountCommissionReserved, release.Legs[0].Account)
+	assert.Equal(t, -ledger.NetAmountCents, release.Legs[0].Amount)
+	assert.Equal(t, PromotionFundAccountCommissionAvailable, release.Legs[1].Account)
+	assert.Equal(t, ledger.NetAmountCents, release.Legs[1].Amount)
+	assert.Equal(t, PromotionFundAccountCommissionReserved, release.Legs[2].Account)
+	assert.Equal(t, -otherLedger.NetAmountCents, release.Legs[2].Amount)
+	assert.Equal(t, PromotionFundAccountCommissionAvailable, release.Legs[3].Account)
+	assert.Equal(t, otherLedger.NetAmountCents, release.Legs[3].Amount)
+
+	var payoutDebt PromotionFundTransaction
+	require.NoError(t, DB.Preload("Legs").
+		Where("transaction_key = ?", fmt.Sprintf("refund:%d:promotion_withdrawals:%d:cash_debt", refundCase.Id, withdrawal.Id)).
+		First(&payoutDebt).Error)
+	require.Len(t, payoutDebt.Legs, 1)
+	assert.Equal(t, PromotionFundAccountRefundDebt, payoutDebt.Legs[0].Account)
+	assert.Equal(t, PromotionFundAssetCash, payoutDebt.Legs[0].Asset)
+	assert.Equal(t, withdrawal.NetAmountCents, payoutDebt.Legs[0].Amount)
+
+	var cancelledOperations int64
+	require.NoError(t, DB.Model(&PromotionWithdrawalOperation{}).
+		Where("withdrawal_id = ? AND action = ?", withdrawal.Id, PromotionWithdrawalActionCancelledByRefund).
+		Count(&cancelledOperations).Error)
+	assert.Equal(t, int64(1), cancelledOperations)
+}
+
+func TestHandlePromotionRefund_UnknownCommissionStateRequiresRootReviewAndHoldsBothUsers(t *testing.T) {
+	truncateTables(t)
+	setInvitationRebateFreezeDaysForTest(t, 0)
+	setInvitationRebatePercentageForTest(t, 10)
+	insertInviterAndInviteeForRebateTest(t, 715, 716)
+	topUp := &TopUp{
+		UserId:             716,
+		Purpose:            TopUpPurposeAPIBalance,
+		Amount:             10,
+		Money:              10,
+		CreditedQuota:      1000,
+		PaidAmountMinor:    1000,
+		PaidCurrency:       "CNY",
+		PaidAmountVerified: true,
+		TradeNo:            "refund-unknown-commission-state",
+		PaymentMethod:      "alipay",
+		PaymentProvider:    PaymentProviderEpay,
+		CreateTime:         time.Now().Unix(),
+		CompleteTime:       time.Now().Unix(),
+		Status:             common.TopUpStatusSuccess,
+	}
+	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", topUp.CreditedQuota).Error)
+	rebate, err := SettleInvitationRebateTx(DB, topUp)
+	require.NoError(t, err)
+	require.NotNil(t, rebate)
+	ledger := getPromotionCommissionLedgerForTest(t, 715)
+	require.NoError(t, DB.Model(&PromotionCommissionLedger{}).Where("id = ?", ledger.Id).Update("status", "legacy_unknown").Error)
+
+	refundCase, err := HandlePromotionRefund(PromotionRefundInput{
+		Provider:            PaymentProviderEpay,
+		TradeNo:             topUp.TradeNo,
+		RefundTradeNo:       "refund-unknown-commission-state-1",
+		Kind:                PromotionRefundKindFull,
+		PaidAmountMinor:     topUp.PaidAmountMinor,
+		RefundedAmountMinor: topUp.PaidAmountMinor,
+		Currency:            topUp.PaidCurrency,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PromotionRefundCaseStatusPendingReview, refundCase.Status)
+	assert.True(t, refundCase.RequiresRootReview)
+	assert.Equal(t, topUp.Id, refundCase.TopUpId)
+	assert.Equal(t, rebate.Id, refundCase.InvitationRebateId)
+	assert.Equal(t, ledger.Id, refundCase.CommissionLedgerId)
+	assert.Contains(t, refundCase.Reason, `commission ledger state "legacy_unknown" requires Root assessment`)
+	assert.Empty(t, refundCase.Obligations)
+
+	require.NoError(t, DB.Where("id = ?", ledger.Id).First(&ledger).Error)
+	assert.Equal(t, "legacy_unknown", ledger.Status)
+	require.NoError(t, DB.Where("id = ?", rebate.Id).First(rebate).Error)
+	assert.Equal(t, InvitationRebateStatusSettled, rebate.Status)
+	for _, userId := range []int{715, 716} {
+		var user User
+		require.NoError(t, DB.Where("id = ?", userId).First(&user).Error)
+		assert.True(t, user.RefundHold)
+	}
+	ensureFinancialActorTestUser(t, 91, common.RoleRootUser)
+
+	_, err = ApplyPromotionRefundRecoveryAction(PromotionRefundRecoveryActionInput{
+		RefundCaseId: refundCase.Id, IdempotencyKey: "release-unknown-commission-hold",
+		Action: PromotionRefundActionReleaseHold, ActorId: 91, ActorRole: common.RoleRootUser,
+		Remark:                            "attempt release before Root assessment",
+		ExpectedResponsibilityFingerprint: refundCase.ResponsibilityFingerprint,
+	})
+	require.EqualError(t, err, "refund case requires a root review waiver before hold release")
+}
+
+func TestHandlePromotionRefund_TransferredCommissionWithInsufficientWalletCreatesDebt(t *testing.T) {
 	truncateTables(t)
 	setInvitationRebateFreezeDaysForTest(t, 0)
 	setInvitationRebatePercentageForTest(t, 10)
 	insertInviterAndInviteeForRebateTest(t, 721, 722)
 	topUp := &TopUp{
 		UserId:             722,
+		Purpose:            TopUpPurposeAPIBalance,
 		Amount:             10,
 		Money:              10,
+		CreditedQuota:      1000,
 		PaidAmountMinor:    1000,
 		PaidCurrency:       "CNY",
 		PaidAmountVerified: true,
@@ -708,6 +1119,7 @@ func TestHandlePromotionRefund_TransferredCommissionWithInsufficientWalletStaysP
 		Status:             common.TopUpStatusSuccess,
 	}
 	require.NoError(t, topUp.Insert())
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 722).Update("quota", 1000).Error)
 	rebate, err := SettleInvitationRebateTx(DB, topUp)
 	require.NoError(t, err)
 	require.NotNil(t, rebate)
@@ -731,12 +1143,18 @@ func TestHandlePromotionRefund_TransferredCommissionWithInsufficientWalletStaysP
 	})
 	require.NoError(t, err)
 	assert.Equal(t, PromotionRefundCaseStatusPendingReview, refundCase.Status)
-	assert.Contains(t, refundCase.Reason, "wallet balance is insufficient")
+	assert.Equal(t, int64(ledger.QuotaEquivalent), refundCase.DebtCreatedQuota)
+	require.Len(t, refundCase.Obligations, 1)
+	assert.Equal(t, int64(ledger.QuotaEquivalent), refundCase.Obligations[0].OutstandingAmount())
 	require.NoError(t, DB.Where("id = ?", rebate.Id).First(rebate).Error)
-	assert.Equal(t, InvitationRebateStatusSettled, rebate.Status)
+	assert.Equal(t, InvitationRebateStatusReversed, rebate.Status)
 	require.NoError(t, DB.Where("id = ?", ledger.Id).First(&ledger).Error)
-	assert.Equal(t, PromotionCommissionStatusTransferred, ledger.Status)
+	assert.Equal(t, PromotionCommissionStatusReversed, ledger.Status)
 	assert.False(t, ledger.Cashable)
+	var inviter User
+	require.NoError(t, DB.Where("id = ?", 721).First(&inviter).Error)
+	assert.True(t, inviter.RefundHold)
+	assert.Equal(t, int64(ledger.QuotaEquivalent), inviter.RefundDebtQuota)
 }
 
 func TestSyncInvitationRebatesForInviter_ExcludesSubscriptionTopUps(t *testing.T) {
@@ -749,6 +1167,7 @@ func TestSyncInvitationRebatesForInviter_ExcludesSubscriptionTopUps(t *testing.T
 	insertSubscriptionOrderForPaymentGuardTest(t, "rebate-subscription-order", 702, plan.Id, PaymentProviderStripe)
 	topUp := &TopUp{
 		UserId:          702,
+		Purpose:         TopUpPurposeSubscription,
 		Amount:          0,
 		Money:           9.99,
 		TradeNo:         "rebate-subscription-order",
@@ -766,6 +1185,47 @@ func TestSyncInvitationRebatesForInviter_ExcludesSubscriptionTopUps(t *testing.T
 	assert.Zero(t, affQuota)
 	assert.Zero(t, affHistoryQuota)
 	assert.Equal(t, int64(0), getInvitationRebateCountForTest(t, 701))
+}
+
+func TestInvitationFirstTopUpRewardIgnoresSubscriptionCompatibilityRows(t *testing.T) {
+	truncateTables(t)
+	growthSetting := operation_setting.GetGrowthSetting()
+	oldQuota := growthSetting.InviteFirstTopUpRewardQuota
+	oldCompliance := operation_setting.GetPaymentSetting().ComplianceConfirmed
+	oldComplianceVersion := operation_setting.GetPaymentSetting().ComplianceTermsVersion
+	t.Cleanup(func() {
+		growthSetting.InviteFirstTopUpRewardQuota = oldQuota
+		operation_setting.GetPaymentSetting().ComplianceConfirmed = oldCompliance
+		operation_setting.GetPaymentSetting().ComplianceTermsVersion = oldComplianceVersion
+	})
+	growthSetting.InviteFirstTopUpRewardQuota = 500
+	operation_setting.GetPaymentSetting().ComplianceConfirmed = true
+	operation_setting.GetPaymentSetting().ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
+
+	insertInviterAndInviteeForRebateTest(t, 781, 782)
+	subscriptionTopUp := &TopUp{
+		UserId: 782, Purpose: TopUpPurposeSubscription, Money: 9.99,
+		TradeNo: "reward-subscription-first", PaymentMethod: PaymentMethodStripe,
+		PaymentProvider: PaymentProviderStripe, CreateTime: time.Now().Unix(),
+		CompleteTime: time.Now().Unix(), Status: common.TopUpStatusSuccess,
+	}
+	require.NoError(t, subscriptionTopUp.Insert())
+
+	reward, err := SettleInvitationMilestoneReward(782, InvitationRewardTypeFirstTopUp)
+	require.NoError(t, err)
+	assert.Nil(t, reward)
+
+	apiTopUp := &TopUp{
+		UserId: 782, Purpose: TopUpPurposeAPIBalance, Amount: 10, Money: 10,
+		TradeNo: "reward-api-first", PaymentMethod: "alipay",
+		PaymentProvider: PaymentProviderEpay, CreateTime: time.Now().Unix(),
+		CompleteTime: time.Now().Unix(), Status: common.TopUpStatusSuccess,
+	}
+	require.NoError(t, apiTopUp.Insert())
+	reward, err = SettleInvitationMilestoneReward(782, InvitationRewardTypeFirstTopUp)
+	require.NoError(t, err)
+	require.NotNil(t, reward)
+	assert.Equal(t, apiTopUp.Id, reward.TriggerTopUpId)
 }
 
 func TestInvitationFirstTopUpReward_SettlesOnlyOnce(t *testing.T) {
@@ -861,7 +1321,92 @@ func TestInvitationFirstRequestReward_SettlesOnlyOnce(t *testing.T) {
 	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 901, InvitationRewardTypeFirstRequest))
 }
 
-func TestInvitationMilestoneRewardSkipsWhenInvitationQuotaIsFull(t *testing.T) {
+func TestInvitationFirstRequestRewardDoesNotBackfillExistingUsers(t *testing.T) {
+	truncateTables(t)
+	growthSetting := operation_setting.GetGrowthSetting()
+	oldQuota := growthSetting.InviteFirstRequestRewardQuota
+	oldCompliance := operation_setting.GetPaymentSetting().ComplianceConfirmed
+	oldComplianceVersion := operation_setting.GetPaymentSetting().ComplianceTermsVersion
+	t.Cleanup(func() {
+		growthSetting.InviteFirstRequestRewardQuota = oldQuota
+		operation_setting.GetPaymentSetting().ComplianceConfirmed = oldCompliance
+		operation_setting.GetPaymentSetting().ComplianceTermsVersion = oldComplianceVersion
+	})
+	growthSetting.InviteFirstRequestRewardQuota = 4321
+	operation_setting.GetPaymentSetting().ComplianceConfirmed = true
+	operation_setting.GetPaymentSetting().ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
+
+	insertInviterAndInviteeForRebateTest(t, 905, 906)
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", 906).Update("request_count", 7).Error)
+
+	var reward *InvitationReward
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		reward, err = QueueInvitationFirstRequestRewardTx(tx, 906)
+		return err
+	}))
+	assert.Nil(t, reward)
+	assert.Zero(t, getInvitationRewardCountForTest(t, 905, InvitationRewardTypeFirstRequest))
+}
+
+func TestInvitationFirstRequestRewardRetriesDurableSnapshotAfterJournalFailure(t *testing.T) {
+	truncateTables(t)
+	growthSetting := operation_setting.GetGrowthSetting()
+	oldQuota := growthSetting.InviteFirstRequestRewardQuota
+	oldCompliance := operation_setting.GetPaymentSetting().ComplianceConfirmed
+	oldComplianceVersion := operation_setting.GetPaymentSetting().ComplianceTermsVersion
+	oldBatchUpdate := common.BatchUpdateEnabled
+	t.Cleanup(func() {
+		growthSetting.InviteFirstRequestRewardQuota = oldQuota
+		operation_setting.GetPaymentSetting().ComplianceConfirmed = oldCompliance
+		operation_setting.GetPaymentSetting().ComplianceTermsVersion = oldComplianceVersion
+		common.BatchUpdateEnabled = oldBatchUpdate
+		require.NoError(t, DB.AutoMigrate(&PromotionFundTransactionLeg{}))
+	})
+	growthSetting.InviteFirstRequestRewardQuota = 4321
+	operation_setting.GetPaymentSetting().ComplianceConfirmed = true
+	operation_setting.GetPaymentSetting().ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
+	common.BatchUpdateEnabled = false
+
+	insertInviterAndInviteeForRebateTest(t, 911, 912)
+	require.NoError(t, DB.Migrator().DropTable(&PromotionFundTransactionLeg{}))
+	UpdateUserUsedQuotaAndRequestCount(912, 25)
+
+	var invitee User
+	require.NoError(t, DB.Where("id = ?", 912).First(&invitee).Error)
+	assert.Equal(t, 1, invitee.RequestCount)
+	assert.Equal(t, 25, invitee.UsedQuota)
+	var pending InvitationReward
+	require.NoError(t, DB.Where("invitee_id = ? AND reward_type = ?", 912, InvitationRewardTypeFirstRequest).First(&pending).Error)
+	assert.Equal(t, InvitationRewardStatusPending, pending.Status)
+	assert.Equal(t, 4321, pending.RewardQuota)
+	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 911)
+	assert.Zero(t, affQuota)
+	assert.Zero(t, affHistoryQuota)
+
+	growthSetting.InviteFirstRequestRewardQuota = 9999
+	require.NoError(t, DB.AutoMigrate(&PromotionFundTransactionLeg{}))
+	reward, err := SettleInvitationMilestoneReward(912, InvitationRewardTypeFirstRequest)
+	require.NoError(t, err)
+	require.NotNil(t, reward)
+	assert.Equal(t, 4321, reward.RewardQuota)
+	assert.Equal(t, InvitationRewardStatusSettled, reward.Status)
+	reward, err = SettleInvitationMilestoneReward(912, InvitationRewardTypeFirstRequest)
+	require.NoError(t, err)
+	assert.Nil(t, reward)
+	affQuota, affHistoryQuota = getInvitationQuotaForTest(t, 911)
+	assert.Equal(t, 4321, affQuota)
+	assert.Equal(t, 4321, affHistoryQuota)
+	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 911, InvitationRewardTypeFirstRequest))
+
+	var issuedCount int64
+	require.NoError(t, DB.Model(&PromotionFundTransaction{}).
+		Where("transaction_key = ?", "invitation_reward:"+strconv.Itoa(pending.Id)+":issued").
+		Count(&issuedCount).Error)
+	assert.Equal(t, int64(1), issuedCount)
+}
+
+func TestInvitationMilestoneRewardRemainsPendingWhenInvitationQuotaIsFull(t *testing.T) {
 	truncateTables(t)
 	growthSetting := operation_setting.GetGrowthSetting()
 	oldQuota := growthSetting.InviteFirstRequestRewardQuota
@@ -888,7 +1433,11 @@ func TestInvitationMilestoneRewardSkipsWhenInvitationQuotaIsFull(t *testing.T) {
 	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 951)
 	assert.Equal(t, common.MaxQuota-100, affQuota)
 	assert.Equal(t, common.MaxQuota-100, affHistoryQuota)
-	assert.Zero(t, getInvitationRewardCountForTest(t, 951, InvitationRewardTypeFirstRequest))
+	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 951, InvitationRewardTypeFirstRequest))
+	var pending InvitationReward
+	require.NoError(t, DB.Where("invitee_id = ? AND reward_type = ?", 952, InvitationRewardTypeFirstRequest).First(&pending).Error)
+	assert.Equal(t, InvitationRewardStatusPending, pending.Status)
+	assert.Equal(t, 200, pending.RewardQuota)
 }
 
 func TestRechargeEpayKeepsTopUpWhenFirstTopUpRewardCapacityIsFull(t *testing.T) {
@@ -932,7 +1481,12 @@ func TestRechargeEpayKeepsTopUpWhenFirstTopUpRewardCapacityIsFull(t *testing.T) 
 	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 971)
 	assert.Equal(t, common.MaxQuota-100, affQuota)
 	assert.Equal(t, common.MaxQuota-100, affHistoryQuota)
-	assert.Zero(t, getInvitationRewardCountForTest(t, 971, InvitationRewardTypeFirstTopUp))
+	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 971, InvitationRewardTypeFirstTopUp))
+	var pending InvitationReward
+	require.NoError(t, DB.Where("invitee_id = ? AND reward_type = ?", 972, InvitationRewardTypeFirstTopUp).First(&pending).Error)
+	assert.Equal(t, InvitationRewardStatusPending, pending.Status)
+	assert.Equal(t, 200, pending.RewardQuota)
+	assert.Equal(t, topUp.Id, pending.TriggerTopUpId)
 }
 
 func TestInvitationRegisterRewardWithZeroQuotaCountsOnceAndStaysOutOfRewardList(t *testing.T) {
@@ -970,14 +1524,20 @@ func TestInvitationRegisterRewardWithZeroQuotaCountsOnceAndStaysOutOfRewardList(
 func TestInvitationRegisterReward_IsRecorded(t *testing.T) {
 	truncateTables(t)
 	oldQuotaForInviter := common.QuotaForInviter
+	oldQuotaForInvitee := common.QuotaForInvitee
+	oldQuotaForNewUser := common.QuotaForNewUser
 	oldCompliance := operation_setting.GetPaymentSetting().ComplianceConfirmed
 	oldComplianceVersion := operation_setting.GetPaymentSetting().ComplianceTermsVersion
 	t.Cleanup(func() {
 		common.QuotaForInviter = oldQuotaForInviter
+		common.QuotaForInvitee = oldQuotaForInvitee
+		common.QuotaForNewUser = oldQuotaForNewUser
 		operation_setting.GetPaymentSetting().ComplianceConfirmed = oldCompliance
 		operation_setting.GetPaymentSetting().ComplianceTermsVersion = oldComplianceVersion
 	})
 	common.QuotaForInviter = 2468
+	common.QuotaForInvitee = 1357
+	common.QuotaForNewUser = 100
 	operation_setting.GetPaymentSetting().ComplianceConfirmed = true
 	operation_setting.GetPaymentSetting().ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 
@@ -996,6 +1556,7 @@ func TestInvitationRegisterReward_IsRecorded(t *testing.T) {
 		Status:    common.UserStatusEnabled,
 	}
 	require.NoError(t, invitee.Insert(1001))
+	assert.Equal(t, 1457, invitee.Quota)
 
 	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 1001)
 	assert.Equal(t, 2468, affQuota)

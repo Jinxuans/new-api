@@ -286,11 +286,14 @@ func sessionAsyncPaymentFailed(ctx context.Context, event stripe.Event, callerIp
 
 func stripePaymentRefunded(ctx context.Context, event stripe.Event, callerIp string) error {
 	referenceId := resolveStripeWebhookTradeNo(ctx, event)
-	refundId := firstNonEmptyString(
+	// Keep the exact pre-upgrade selection order as the only compatibility
+	// alias; both references are therefore proven to come from this event.
+	legacyRefundId := firstNonEmptyString(
 		stripeObjectValue(event, "refunds", "data", "0", "id"),
 		stripeObjectValue(event, "id"),
 		string(event.Type),
 	)
+	refundId := firstNonEmptyString(string(event.ID), legacyRefundId)
 	if referenceId == "" {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe 退款事件缺少本地订单号 event_type=%s refund_id=%s client_ip=%s", string(event.Type), refundId, callerIp))
 		return errors.New("stripe refund is missing local trade number")
@@ -306,14 +309,16 @@ func stripePaymentRefunded(ctx context.Context, event stripe.Event, callerIp str
 		kind = model.PromotionRefundKindPartial
 	}
 	return handlePromotionRefundFromWebhook(ctx, model.PromotionRefundInput{
-		Provider:            model.PaymentProviderStripe,
-		TradeNo:             referenceId,
-		RefundTradeNo:       refundId,
-		Kind:                kind,
-		PaidAmountMinor:     amount,
-		RefundedAmountMinor: amountRefunded,
-		Currency:            stripeObjectValue(event, "currency"),
-		Remark:              "stripe refund",
+		Provider:                 model.PaymentProviderStripe,
+		TradeNo:                  referenceId,
+		RefundTradeNo:            refundId,
+		EquivalentRefundTradeNos: []string{legacyRefundId},
+		Kind:                     kind,
+		PaidAmountMinor:          amount,
+		RefundedAmountMinor:      amountRefunded,
+		Currency:                 stripeObjectValue(event, "currency"),
+		Remark:                   "stripe refund",
+		AmountIsCumulative:       true,
 	})
 }
 
@@ -439,6 +444,11 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 		logger.LogError(ctx, fmt.Sprintf("Stripe 回调支付快照无效 trade_no=%s amount_total=%d currency=%q event_type=%s error=%q", referenceId, amountMinor, event.GetObjectValue("currency"), string(event.Type), err.Error()))
 		return err
 	}
+	payment.ProviderPaymentId = firstNonEmptyString(
+		event.GetObjectValue("payment_intent"),
+		event.GetObjectValue("id"),
+		string(event.ID),
+	)
 	err = model.RechargeStripe(referenceId, customerId, payment, callerIp)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("Stripe 充值处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))

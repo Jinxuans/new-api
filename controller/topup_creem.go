@@ -324,7 +324,10 @@ func handleCreemRefund(c *gin.Context, event *CreemWebhookEvent) {
 		event.Object.Checkout.Metadata["trade_no"],
 		event.Object.Checkout.Metadata["reference_id"],
 	)
-	refundTradeNo := firstNonEmptyString(event.Object.Id, event.Object.Transaction.Id, event.Object.Order.Transaction, event.Id, event.EventType)
+	// Keep the exact pre-upgrade selection order as the only compatibility
+	// alias; both references are therefore proven to come from this event.
+	legacyRefundTradeNo := firstNonEmptyString(event.Object.Id, event.Object.Transaction.Id, event.Object.Order.Transaction, event.Id, event.EventType)
+	refundTradeNo := firstNonEmptyString(event.Id, legacyRefundTradeNo)
 	if referenceId == "" {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 退款事件缺少本地订单号 event_type=%s event_id=%s refund_trade_no=%s", event.EventType, event.Id, refundTradeNo))
 		c.Status(http.StatusOK)
@@ -334,23 +337,26 @@ func handleCreemRefund(c *gin.Context, event *CreemWebhookEvent) {
 	if paidAmount <= 0 {
 		paidAmount = event.Object.Order.AmountPaid
 	}
-	refundedAmount := event.Object.RefundAmount
-	if refundedAmount <= 0 {
-		refundedAmount = event.Object.Transaction.RefundedAmount
+	refundedAmount := event.Object.Transaction.RefundedAmount
+	amountIsCumulative := refundedAmount > 0
+	if !amountIsCumulative {
+		refundedAmount = event.Object.RefundAmount
 	}
 	kind := model.PromotionRefundKindFull
 	if refundedAmount > 0 && paidAmount > 0 && refundedAmount < paidAmount {
 		kind = model.PromotionRefundKindPartial
 	}
 	if err := handlePromotionRefundFromWebhook(c.Request.Context(), model.PromotionRefundInput{
-		Provider:            model.PaymentProviderCreem,
-		TradeNo:             referenceId,
-		RefundTradeNo:       refundTradeNo,
-		Kind:                kind,
-		PaidAmountMinor:     int64(paidAmount),
-		RefundedAmountMinor: int64(refundedAmount),
-		Currency:            firstNonEmptyString(event.Object.Transaction.Currency, event.Object.Order.Currency),
-		Remark:              "creem refund",
+		Provider:                 model.PaymentProviderCreem,
+		TradeNo:                  referenceId,
+		RefundTradeNo:            refundTradeNo,
+		EquivalentRefundTradeNos: []string{legacyRefundTradeNo},
+		Kind:                     kind,
+		PaidAmountMinor:          int64(paidAmount),
+		RefundedAmountMinor:      int64(refundedAmount),
+		Currency:                 firstNonEmptyString(event.Object.Transaction.Currency, event.Object.Order.Currency),
+		Remark:                   "creem refund",
+		AmountIsCumulative:       amountIsCumulative,
 	}); err != nil {
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
@@ -464,6 +470,11 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
+	payment.ProviderPaymentId = firstNonEmptyString(
+		event.Object.Transaction.Id,
+		event.Object.Order.Transaction,
+		event.Object.Order.Id,
+	)
 	err = model.RechargeCreem(referenceId, customerEmail, customerName, payment, c.ClientIP())
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 充值处理失败 trade_no=%s creem_order_id=%s client_ip=%s error=%q", referenceId, event.Object.Order.Id, c.ClientIP(), err.Error()))

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,9 +13,8 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
-// RegisterScheduledSystemTasks wires the periodic channel test, upstream model
-// update, and async task polling (Midjourney / Suno / video) jobs into the
-// system task framework so a DB lease dedups execution across multiple master
+// RegisterScheduledSystemTasks wires periodic operational jobs into the system
+// task framework so a DB lease dedups execution across multiple master
 // instances and each run is recorded as one task row. Call this before
 // service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
@@ -22,6 +22,36 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(promotionFundReconcileHandler{})
+}
+
+// promotionFundReconcileHandler periodically replays the versioned migration
+// after startup so writes from an older instance in a rolling deployment are
+// eventually journaled. The system-task lease allows only one master to scan.
+type promotionFundReconcileHandler struct{}
+
+func (promotionFundReconcileHandler) Type() string {
+	return model.SystemTaskTypePromotionFundReconcile
+}
+
+// Financial history reconciliation must remain enabled even when UPDATE_TASK
+// disables provider-task polling. A DB lease still limits it to one master.
+func (promotionFundReconcileHandler) Enabled() bool { return true }
+
+func (promotionFundReconcileHandler) Interval() time.Duration { return time.Hour }
+
+func (promotionFundReconcileHandler) NewPayload() any { return nil }
+
+func (promotionFundReconcileHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	fundErr := model.ReconcilePromotionFundTransactions(model.DB.WithContext(ctx))
+	operationErr := model.BackfillPromotionWithdrawalOperations(model.DB.WithContext(ctx))
+	refundErr := model.ReconcilePendingPromotionRefundTopUps(model.DB.WithContext(ctx))
+	err := errors.Join(fundErr, operationErr, refundErr)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, nil, nil)
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and

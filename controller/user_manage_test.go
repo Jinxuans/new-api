@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,12 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 	model.DB, model.LOG_DB = db, db
 	require.NoError(t, db.AutoMigrate(
 		&model.User{}, &model.UserSession{}, &model.Log{}, &model.CasbinRule{}, &model.AuthzRole{},
+		&model.SubscriptionPlan{}, &model.UserSubscription{},
+		&model.SubscriptionAdminOperation{}, &model.SubscriptionAdminOperationItem{},
+		&model.TopUp{}, &model.InvitationRebate{}, &model.InvitationReward{},
+		&model.PromotionCommissionLedger{}, &model.PromotionRefundCase{}, &model.PromotionRefundCaseUser{},
+		&model.PromotionRefundObligation{},
+		&model.PromotionFundTransaction{}, &model.PromotionFundTransactionLeg{},
 	))
 
 	t.Cleanup(func() {
@@ -45,6 +52,72 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 		}
 	})
 	return db
+}
+
+func TestAdminDeleteUserSubscriptionRetainsEvidenceAndRecordsAudit(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.Create(&model.User{
+		Id: 9999, Username: "root-operator", Password: "password",
+		Role: common.RoleRootUser, Status: common.UserStatusEnabled,
+		Group: "default", AffCode: "root-operator-aff",
+	}).Error)
+	user := &model.User{
+		Username: "subscription-delete-audit-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(user).Error)
+	subscription := &model.UserSubscription{
+		UserId: user.Id, PlanId: 91, AmountTotal: 1000,
+		StartTime: common.GetTimestamp() - 60, EndTime: common.GetTimestamp() + 3600,
+		Status: "active", Source: "admin",
+	}
+	require.NoError(t, db.Create(subscription).Error)
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body, err := common.Marshal(map[string]interface{}{
+		"reason": "verified entitlement correction", "idempotency_key": "legacy-delete-invalidate",
+	})
+	require.NoError(t, err)
+	c.Request = httptest.NewRequest(http.MethodDelete,
+		fmt.Sprintf("/api/subscription/admin/user_subscriptions/%d", subscription.Id), bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(subscription.Id)}}
+	c.Set("id", 9999)
+	c.Set("role", common.RoleRootUser)
+	c.Set("username", "root-operator")
+	AdminDeleteUserSubscription(c)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":true`)
+	var retained model.UserSubscription
+	require.NoError(t, db.First(&retained, subscription.Id).Error)
+	assert.Equal(t, "cancelled", retained.Status)
+	assert.LessOrEqual(t, retained.EndTime, subscription.EndTime)
+
+	var auditLog model.Log
+	require.NoError(t, db.Where("user_id = ? AND type = ?", 9999, model.LogTypeManage).
+		Order("id DESC").First(&auditLog).Error)
+	assert.Contains(t, auditLog.Content, fmt.Sprintf("subscription entitlement %d", subscription.Id))
+	var other map[string]interface{}
+	require.NoError(t, common.Unmarshal([]byte(auditLog.Other), &other))
+	op, ok := other["op"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "subscription.entitlement_invalidate", op["action"])
+	params, ok := op["params"].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, user.Id, params["target_user_id"])
+	assert.Equal(t, http.MethodDelete, params["request_method"])
+	assert.Equal(t, "verified entitlement correction", params["reason"])
+
+	var operation model.SubscriptionAdminOperation
+	require.NoError(t, db.Preload("Items").First(&operation).Error)
+	assert.Equal(t, model.SubscriptionAdminOperationInvalidate, operation.Kind)
+	assert.Equal(t, "verified entitlement correction", operation.Reason)
+	require.Len(t, operation.Items, 1)
+	assert.Equal(t, "active", operation.Items[0].StatusBefore)
+	assert.Equal(t, "cancelled", operation.Items[0].StatusAfter)
 }
 
 func performManageUserRequest(t *testing.T, body string) *httptest.ResponseRecorder {
@@ -158,4 +231,63 @@ func TestManageUserDeleteReturnsImmediatelyAndUnknownActionFails(t *testing.T) {
 	require.NoError(t, db.First(&unchanged, unchanged.Id).Error)
 	assert.EqualValues(t, 1, unchanged.AuthVersion)
 	assert.Equal(t, common.UserStatusEnabled, unchanged.Status)
+}
+
+func TestManageUserQuotaReplayDoesNotDuplicateManageAudit(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.Create(&model.User{
+		Id: 9999, Username: "root-operator", Password: "password",
+		Role: common.RoleRootUser, Status: common.UserStatusEnabled,
+		Group: "default", AffCode: "root-operator-quota-aff",
+	}).Error)
+	user := model.User{
+		Username: "managed-quota-replay-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 100,
+	}
+	require.NoError(t, db.Create(&user).Error)
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":25,"remark":"verified correction","idempotency_key":"manage-quota-replay"}`, user.Id)
+
+	first := performManageUserRequest(t, body)
+	assert.Equal(t, http.StatusOK, first.Code)
+	assert.Contains(t, first.Body.String(), `"success":true`)
+	assert.Contains(t, first.Body.String(), `"replayed":false`)
+
+	second := performManageUserRequest(t, body)
+	assert.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), `"success":true`)
+	assert.Contains(t, second.Body.String(), `"replayed":true`)
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	assert.Equal(t, 125, user.Quota)
+	var fundCount int64
+	require.NoError(t, db.Model(&model.PromotionFundTransaction{}).
+		Where("transaction_key = ?", "admin_quota:manage-quota-replay").
+		Count(&fundCount).Error)
+	assert.Equal(t, int64(1), fundCount)
+	var auditLogs []model.Log
+	require.NoError(t, db.Where("user_id = ? AND type = ?", 9999, model.LogTypeManage).Find(&auditLogs).Error)
+	require.Len(t, auditLogs, 1)
+	var other map[string]interface{}
+	require.NoError(t, common.Unmarshal([]byte(auditLogs[0].Other), &other))
+	op, ok := other["op"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "user.quota_add", op["action"])
+}
+
+func TestManageUserQuotaRequiresIdempotencyKey(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-missing-key", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 100,
+	}
+	require.NoError(t, db.Create(&user).Error)
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":25,"remark":"verified correction"}`, user.Id)
+
+	response := performManageUserRequest(t, body)
+	assert.Contains(t, response.Body.String(), `"success":false`)
+	require.NoError(t, db.First(&user, user.Id).Error)
+	assert.Equal(t, 100, user.Quota)
+	var fundCount int64
+	require.NoError(t, db.Model(&model.PromotionFundTransaction{}).Count(&fundCount).Error)
+	assert.Zero(t, fundCount)
 }

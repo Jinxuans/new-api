@@ -143,6 +143,40 @@ func TestSystemTaskClaimPassDispatchesByType(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+func TestSystemTaskRunnerInitialPassSchedulesAndDispatches(t *testing.T) {
+	truncate(t)
+
+	ran := make(chan stubSystemTaskRunResult, 1)
+	handler := &stubScheduledHandler{
+		taskType: "test_initial_runner_pass",
+		enabled:  true,
+		interval: time.Hour,
+		onRun: func(_ context.Context, task *model.SystemTask, runnerID string) {
+			ran <- stubSystemTaskRunResult{
+				taskID: task.TaskID,
+				err:    model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, nil, ""),
+			}
+		},
+	}
+	withSystemTaskRegistry(t, handler)
+
+	var lastScheduler time.Time
+	var lastStaleLockCleanup time.Time
+	runSystemTaskRunnerPass("runner-initial-pass", &lastScheduler, &lastStaleLockCleanup)
+
+	select {
+	case result := <-ran:
+		require.NoError(t, result.err)
+		assert.NotEmpty(t, result.taskID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the initial runner pass did not schedule and dispatch the due task")
+	}
+	require.Eventually(t, func() bool {
+		latest, err := model.GetLatestSystemTask(handler.taskType)
+		return err == nil && latest != nil && latest.Status == model.SystemTaskStatusSucceeded
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
 func TestSystemTaskClaimPassDispatchesEarliestPendingByType(t *testing.T) {
 	truncate(t)
 

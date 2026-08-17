@@ -48,6 +48,16 @@ func TestClaimDailyCheckinCreatesRewardAndEvent(t *testing.T) {
 	var event model.PromotionEvent
 	require.NoError(t, model.DB.Where("user_id = ? AND event_type = ?", 3101, model.PromotionEventTypeGrowthRewardSettled).First(&event).Error)
 	assert.Equal(t, 200, event.QuotaDelta)
+
+	var fund model.PromotionFundTransaction
+	require.NoError(t, model.DB.Preload("Legs").
+		Where("kind = ? AND source_type = ? AND source_id = ?", model.PromotionFundKindGrowthRewardIssued, "growth_rewards", reward.Id).
+		First(&fund).Error)
+	require.Len(t, fund.Legs, 1)
+	assert.Equal(t, model.PromotionFundAccountAPIBalance, fund.Legs[0].Account)
+	assert.Equal(t, int64(200), fund.Legs[0].Amount)
+	require.NotNil(t, fund.Legs[0].BalanceAfter)
+	assert.Equal(t, int64(300), *fund.Legs[0].BalanceAfter)
 }
 
 func TestClaimDailyCheckinRespectsDailyBudget(t *testing.T) {

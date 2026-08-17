@@ -16,24 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Banknote, CheckCircle2, RefreshCw, XCircle } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -50,78 +39,65 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Textarea } from '@/components/ui/textarea'
-import {
-  formatCashCents,
-  formatTime,
-  getItems,
-  statusVariant,
-  type PromotionWithdrawal,
-} from '@/features/promotion/shared'
+import { getItems } from '@/features/promotion/shared'
 import { api } from '@/lib/api'
 
 import { SettingsSection } from '../components/settings-section'
-
-type AdminPromotionWithdrawal = PromotionWithdrawal & {
-  user_id: number
-  reviewer_id?: number
-  payout_account_snapshot?: string
-}
-
-type WithdrawalStatusFilter =
-  | 'pending_review'
-  | 'approved'
-  | 'paid'
-  | 'rejected'
-  | 'failed'
-  | 'all'
+import { GrowthWithdrawalConfirmationDialog } from './growth-withdrawal-confirmation-dialog'
+import { GrowthWithdrawalReviewRow } from './growth-withdrawal-review-row'
+import type {
+  AdminPromotionWithdrawal,
+  WithdrawalConfirmation,
+  WithdrawalStatusFilter,
+} from './growth-withdrawal-review-types'
 
 const PAGE_SIZE = 20
-
-function getPayoutAccount(withdrawal: AdminPromotionWithdrawal) {
-  if (!withdrawal.payout_account_snapshot) return '-'
-  try {
-    const snapshot = JSON.parse(withdrawal.payout_account_snapshot) as {
-      payout_account?: string
-    }
-    return snapshot.payout_account || '-'
-  } catch {
-    return '-'
-  }
-}
 
 export function GrowthWithdrawalsReviewSection() {
   const { t } = useTranslation()
   const [withdrawals, setWithdrawals] = useState<AdminPromotionWithdrawal[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
   const [reviewingId, setReviewingId] = useState<number | null>(null)
   const [statusFilter, setStatusFilter] =
     useState<WithdrawalStatusFilter>('pending_review')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [confirmation, setConfirmation] = useState<{
-    action: 'approve' | 'paid'
-    withdrawal: AdminPromotionWithdrawal
-  } | null>(null)
+  const [confirmation, setConfirmation] =
+    useState<WithdrawalConfirmation | null>(null)
   const [tradeNoById, setTradeNoById] = useState<Record<number, string>>({})
-  const [noteById, setNoteById] = useState<Record<number, string>>({})
+  const [reviewNoteById, setReviewNoteById] = useState<Record<number, string>>(
+    {}
+  )
+  const [failureNoteById, setFailureNoteById] = useState<
+    Record<number, string>
+  >({})
   const loadRequestIdRef = useRef(0)
 
-  const totalPages = useMemo(
-    () => Math.max(1, Math.ceil(total / PAGE_SIZE)),
-    [total]
-  )
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   const loadWithdrawals = useCallback(async () => {
     const requestId = ++loadRequestIdRef.current
+    setConfirmation(null)
     try {
       setLoading(true)
+      setLoadError(false)
       const res = await api.get('/api/growth/admin/withdrawals', {
         params: { p: page, page_size: PAGE_SIZE, status: statusFilter },
       })
       if (requestId !== loadRequestIdRef.current) return
+      if (!res.data?.success) {
+        throw new Error(
+          res.data?.message || 'promotion withdrawals unavailable'
+        )
+      }
       setWithdrawals(getItems<AdminPromotionWithdrawal>(res.data))
       setTotal(Number(res.data?.data?.total || 0))
+    } catch {
+      if (requestId !== loadRequestIdRef.current) return
+      setWithdrawals([])
+      setTotal(0)
+      setLoadError(true)
     } finally {
       if (requestId === loadRequestIdRef.current) {
         setLoading(false)
@@ -130,15 +106,19 @@ export function GrowthWithdrawalsReviewSection() {
   }, [page, statusFilter])
 
   useEffect(() => {
-    loadWithdrawals()
+    void loadWithdrawals()
   }, [loadWithdrawals])
 
   const updateTradeNo = (id: number, value: string) => {
     setTradeNoById((current) => ({ ...current, [id]: value }))
   }
 
-  const updateNote = (id: number, value: string) => {
-    setNoteById((current) => ({ ...current, [id]: value }))
+  const updateReviewNote = (id: number, value: string) => {
+    setReviewNoteById((current) => ({ ...current, [id]: value }))
+  }
+
+  const updateFailureNote = (id: number, value: string) => {
+    setFailureNoteById((current) => ({ ...current, [id]: value }))
   }
 
   const approveWithdrawal = async () => {
@@ -149,11 +129,15 @@ export function GrowthWithdrawalsReviewSection() {
       const res = await api.post(
         `/api/growth/admin/withdrawals/${withdrawal.id}/approve`,
         {
-          review_note: noteById[withdrawal.id] || '',
+          review_note: reviewNoteById[withdrawal.id] || '',
         }
       )
       if (res.data?.success) {
         toast.success(t('Withdrawal request approved'))
+        setReviewNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
         setConfirmation(null)
         await loadWithdrawals()
       }
@@ -162,12 +146,20 @@ export function GrowthWithdrawalsReviewSection() {
     }
   }
 
-  const rejectWithdrawal = async (withdrawal: AdminPromotionWithdrawal) => {
-    const note = noteById[withdrawal.id]?.trim()
+  const requestRejectWithdrawal = (withdrawal: AdminPromotionWithdrawal) => {
+    const note = reviewNoteById[withdrawal.id]?.trim()
     if (!note) {
       toast.error(t('Review note is required'))
       return
     }
+    setConfirmation({ action: 'reject', withdrawal })
+  }
+
+  const rejectWithdrawal = async () => {
+    if (!confirmation || confirmation.action !== 'reject') return
+    const withdrawal = confirmation.withdrawal
+    const note = reviewNoteById[withdrawal.id]?.trim()
+    if (!note) return
     try {
       setReviewingId(withdrawal.id)
       const res = await api.post(
@@ -178,38 +170,11 @@ export function GrowthWithdrawalsReviewSection() {
       )
       if (res.data?.success) {
         toast.success(t('Withdrawal request rejected'))
-        await loadWithdrawals()
-      }
-    } finally {
-      setReviewingId(null)
-    }
-  }
-
-  const requestMarkPaid = (withdrawal: AdminPromotionWithdrawal) => {
-    const tradeNo = tradeNoById[withdrawal.id]?.trim()
-    if (!tradeNo) {
-      toast.error(t('Trade no is required'))
-      return
-    }
-    setConfirmation({ action: 'paid', withdrawal })
-  }
-
-  const markWithdrawalPaid = async () => {
-    if (!confirmation || confirmation.action !== 'paid') return
-    const withdrawal = confirmation.withdrawal
-    const tradeNo = tradeNoById[withdrawal.id]?.trim()
-    if (!tradeNo) return
-    try {
-      setReviewingId(withdrawal.id)
-      const res = await api.post(
-        `/api/growth/admin/withdrawals/${withdrawal.id}/paid`,
-        {
-          trade_no: tradeNo,
-          review_note: noteById[withdrawal.id] || '',
-        }
-      )
-      if (res.data?.success) {
-        toast.success(t('Withdrawal marked paid'))
+        setReviewNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setTradeNoById((current) => ({ ...current, [withdrawal.id]: '' }))
         setConfirmation(null)
         await loadWithdrawals()
       }
@@ -218,33 +183,156 @@ export function GrowthWithdrawalsReviewSection() {
     }
   }
 
-  const confirmationWithdrawal = confirmation?.withdrawal
-  const confirmsPayment = confirmation?.action === 'paid'
-  const confirmationTitle = confirmsPayment
-    ? t('Mark this withdrawal paid?')
-    : t('Approve this withdrawal request?')
-  const confirmationAction = confirmsPayment
-    ? t('Confirm payment')
-    : t('Approve request')
-  const confirmationImpact = confirmsPayment
-    ? t(
-        'This records an offline payment of {{amount}} and closes the linked commission entries. This action cannot be undone here.',
+  const requestInitiatePayout = (withdrawal: AdminPromotionWithdrawal) => {
+    const tradeNo = tradeNoById[withdrawal.id]?.trim()
+    if (!tradeNo) {
+      toast.error(t('Trade no is required'))
+      return
+    }
+    setConfirmation({ action: 'initiate', withdrawal })
+  }
+
+  const initiatePayout = async () => {
+    if (!confirmation || confirmation.action !== 'initiate') return
+    const withdrawal = confirmation.withdrawal
+    const tradeNo = tradeNoById[withdrawal.id]?.trim()
+    if (!tradeNo) return
+    try {
+      setReviewingId(withdrawal.id)
+      const res = await api.post(
+        `/api/growth/admin/withdrawals/${withdrawal.id}/initiate`,
         {
-          amount: formatCashCents(
-            confirmationWithdrawal?.net_amount_cents,
-            confirmationWithdrawal?.currency
-          ),
+          trade_no: tradeNo,
+          review_note: reviewNoteById[withdrawal.id] || '',
         }
       )
-    : t(
-        'This approves a withdrawal of {{amount}} for offline payment. Verify the payout account before continuing.',
+      if (res.data?.success) {
+        toast.success(t('Payout marked in progress'))
+        setReviewNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setFailureNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setTradeNoById((current) => ({ ...current, [withdrawal.id]: '' }))
+        setConfirmation(null)
+        await loadWithdrawals()
+      }
+    } finally {
+      setReviewingId(null)
+    }
+  }
+
+  const markWithdrawalPaid = async () => {
+    if (!confirmation || confirmation.action !== 'paid') return
+    const withdrawal = confirmation.withdrawal
+    try {
+      setReviewingId(withdrawal.id)
+      const res = await api.post(
+        `/api/growth/admin/withdrawals/${withdrawal.id}/paid`,
         {
-          amount: formatCashCents(
-            confirmationWithdrawal?.net_amount_cents,
-            confirmationWithdrawal?.currency
-          ),
+          trade_no: withdrawal.trade_no || '',
+          review_note: reviewNoteById[withdrawal.id] || '',
         }
       )
+      if (res.data?.success) {
+        toast.success(t('Withdrawal marked paid'))
+        setReviewNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setFailureNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setTradeNoById((current) => ({ ...current, [withdrawal.id]: '' }))
+        setConfirmation(null)
+        await loadWithdrawals()
+      }
+    } finally {
+      setReviewingId(null)
+    }
+  }
+
+  const requestFailWithdrawal = (withdrawal: AdminPromotionWithdrawal) => {
+    const failureNote = failureNoteById[withdrawal.id]?.trim()
+    if (!failureNote) {
+      toast.error(t('Failure reason is required'))
+      return
+    }
+    setConfirmation({ action: 'failed', withdrawal })
+  }
+
+  const markWithdrawalFailed = async () => {
+    if (!confirmation || confirmation.action !== 'failed') return
+    const withdrawal = confirmation.withdrawal
+    const failureNote = failureNoteById[withdrawal.id]?.trim()
+    if (!failureNote || !withdrawal.trade_no) return
+    try {
+      setReviewingId(withdrawal.id)
+      const res = await api.post(
+        `/api/growth/admin/withdrawals/${withdrawal.id}/failed`,
+        {
+          trade_no: withdrawal.trade_no,
+          failure_note: failureNote,
+        }
+      )
+      if (res.data?.success) {
+        toast.success(t('Payout marked failed'))
+        setReviewNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setFailureNoteById((current) => ({
+          ...current,
+          [withdrawal.id]: '',
+        }))
+        setTradeNoById((current) => ({ ...current, [withdrawal.id]: '' }))
+        setConfirmation(null)
+        await loadWithdrawals()
+      }
+    } finally {
+      setReviewingId(null)
+    }
+  }
+
+  const confirmSelectedAction = () => {
+    if (loading || reviewingId !== null) return
+
+    let actionPromise: Promise<void> | null = null
+    switch (confirmation?.action) {
+      case 'failed':
+        actionPromise = markWithdrawalFailed()
+        break
+      case 'paid':
+        actionPromise = markWithdrawalPaid()
+        break
+      case 'initiate':
+        actionPromise = initiatePayout()
+        break
+      case 'reject':
+        actionPromise = rejectWithdrawal()
+        break
+      case 'approve':
+        actionPromise = approveWithdrawal()
+        break
+    }
+
+    if (!actionPromise) return
+    void actionPromise.catch(() => {
+      // The shared HTTP client already displays request failures.
+    })
+  }
+
+  let confirmationNote = ''
+  if (confirmation) {
+    confirmationNote =
+      confirmation.action === 'failed'
+        ? failureNoteById[confirmation.withdrawal.id]?.trim() || ''
+        : reviewNoteById[confirmation.withdrawal.id]?.trim() || ''
+  }
 
   return (
     <SettingsSection
@@ -253,7 +341,7 @@ export function GrowthWithdrawalsReviewSection() {
         'Review submitted cash withdrawal requests and mark paid after offline settlement.'
       )}
     >
-      <div className='space-y-4 rounded-lg border p-4'>
+      <div className='flex flex-col gap-4 rounded-lg border p-4'>
         <div className='flex flex-wrap items-center justify-between gap-3'>
           <div className='flex flex-wrap items-center gap-2'>
             <Badge variant={total > 0 ? 'secondary' : 'outline'}>
@@ -263,11 +351,12 @@ export function GrowthWithdrawalsReviewSection() {
               {t('Latest withdrawal requests are shown first.')}
             </span>
           </div>
-          <div className='flex items-center gap-2'>
+          <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
             <Select
               items={[
                 { value: 'pending_review', label: t('Pending review') },
                 { value: 'approved', label: t('Approved awaiting payout') },
+                { value: 'processing', label: t('Payout in progress') },
                 { value: 'paid', label: t('Paid') },
                 { value: 'rejected', label: t('Rejected') },
                 { value: 'failed', label: t('Failed') },
@@ -275,12 +364,14 @@ export function GrowthWithdrawalsReviewSection() {
               ]}
               value={statusFilter}
               onValueChange={(value) => {
+                setConfirmation(null)
+                setLoading(true)
                 setPage(1)
                 setStatusFilter(value as WithdrawalStatusFilter)
               }}
             >
               <SelectTrigger
-                className='w-48'
+                className='w-full sm:w-48'
                 aria-label={t('Withdrawal status')}
               >
                 <SelectValue />
@@ -292,6 +383,9 @@ export function GrowthWithdrawalsReviewSection() {
                   </SelectItem>
                   <SelectItem value='approved'>
                     {t('Approved awaiting payout')}
+                  </SelectItem>
+                  <SelectItem value='processing'>
+                    {t('Payout in progress')}
                   </SelectItem>
                   <SelectItem value='paid'>{t('Paid')}</SelectItem>
                   <SelectItem value='rejected'>{t('Rejected')}</SelectItem>
@@ -307,249 +401,144 @@ export function GrowthWithdrawalsReviewSection() {
               onClick={loadWithdrawals}
               disabled={loading}
             >
-              <RefreshCw className='size-4' />
               {t('Refresh')}
             </Button>
           </div>
         </div>
 
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('Withdrawal')}</TableHead>
-              <TableHead>{t('Payout')}</TableHead>
-              <TableHead>{t('Review')}</TableHead>
-              <TableHead className='text-right'>{t('Actions')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {withdrawals.length > 0 ? (
-              withdrawals.map((withdrawal) => {
-                const isPendingReview = withdrawal.status === 'pending_review'
-                const isApproved = withdrawal.status === 'approved'
-                const canReview = isPendingReview || isApproved
-                const isReviewing = reviewingId === withdrawal.id
-                let reviewTime = '-'
-                if (withdrawal.paid_at) {
-                  reviewTime = formatTime(withdrawal.paid_at)
-                } else if (withdrawal.reviewed_at) {
-                  reviewTime = formatTime(withdrawal.reviewed_at)
-                }
-                return (
-                  <TableRow key={withdrawal.id}>
-                    <TableCell className='min-w-64 whitespace-normal'>
-                      <div className='space-y-1'>
-                        <div className='flex flex-wrap items-center gap-2'>
-                          <span className='font-medium'>
-                            {formatCashCents(
-                              withdrawal.net_amount_cents,
-                              withdrawal.currency
-                            )}
-                          </span>
-                          <Badge variant={statusVariant(withdrawal.status)}>
-                            {t(withdrawal.status)}
-                          </Badge>
-                        </div>
-                        <div className='text-muted-foreground text-xs'>
-                          {t('User ID')}: {withdrawal.user_id} ·{' '}
-                          {t('Applied at')}: {formatTime(withdrawal.applied_at)}
-                        </div>
-                        {withdrawal.trade_no ? (
-                          <div className='text-muted-foreground text-xs'>
-                            {t('Trade no')}: {withdrawal.trade_no}
-                          </div>
-                        ) : null}
-                        {withdrawal.review_note ? (
-                          <div className='text-muted-foreground text-xs'>
-                            {t('Review note')}: {withdrawal.review_note}
-                          </div>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell className='min-w-72 whitespace-normal'>
-                      <div className='space-y-1.5 text-xs'>
-                        <div>
-                          {t('Payout method')}:{' '}
-                          {withdrawal.payout_method || '-'}
-                        </div>
-                        <div className='text-muted-foreground break-all'>
-                          {t('Payout account')}: {getPayoutAccount(withdrawal)}
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell className='min-w-72 whitespace-normal'>
-                      {canReview ? (
-                        <div className='grid gap-2'>
-                          {isApproved ? (
-                            <Input
-                              aria-label={t('Trade no for user {{id}}', {
-                                id: withdrawal.user_id,
-                              })}
-                              value={tradeNoById[withdrawal.id] || ''}
-                              onChange={(event) =>
-                                updateTradeNo(withdrawal.id, event.target.value)
-                              }
-                              placeholder={t('Trade no')}
-                            />
-                          ) : null}
-                          <Textarea
-                            aria-label={t('Review note for user {{id}}', {
-                              id: withdrawal.user_id,
-                            })}
-                            value={noteById[withdrawal.id] || ''}
-                            onChange={(event) =>
-                              updateNote(withdrawal.id, event.target.value)
-                            }
-                            placeholder={t('Review note')}
-                            className='min-h-16'
-                          />
-                        </div>
-                      ) : (
-                        <div className='text-muted-foreground text-xs'>
-                          {reviewTime}
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className='text-right'>
-                      {canReview ? (
-                        <div className='flex flex-wrap justify-end gap-2'>
-                          {isPendingReview ? (
-                            <Button
-                              type='button'
-                              size='sm'
-                              onClick={() =>
-                                setConfirmation({
-                                  action: 'approve',
-                                  withdrawal,
-                                })
-                              }
-                              disabled={isReviewing}
-                            >
-                              <CheckCircle2 className='size-4' />
-                              {t('Approve request')}
-                            </Button>
-                          ) : null}
-                          {isApproved ? (
-                            <Button
-                              type='button'
-                              size='sm'
-                              onClick={() => requestMarkPaid(withdrawal)}
-                              disabled={isReviewing}
-                            >
-                              <Banknote className='size-4' />
-                              {t('Mark paid')}
-                            </Button>
-                          ) : null}
-                          <Button
-                            type='button'
-                            variant='destructive'
-                            size='sm'
-                            onClick={() => rejectWithdrawal(withdrawal)}
-                            disabled={isReviewing}
-                          >
-                            <XCircle className='size-4' />
-                            {t('Reject')}
-                          </Button>
-                        </div>
-                      ) : (
-                        <span className='text-muted-foreground text-xs'>
-                          {t('Reviewed')}
-                        </span>
-                      )}
+        {loadError ? (
+          <Alert variant='destructive'>
+            <AlertTitle>{t('No data available')}</AlertTitle>
+            <AlertDescription className='flex flex-wrap items-center justify-between gap-3'>
+              <span>{t('Refresh the list and try again.')}</span>
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                onClick={() => void loadWithdrawals()}
+              >
+                {t('Try again')}
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <>
+            <Table aria-busy={loading}>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('Withdrawal')}</TableHead>
+                  <TableHead>{t('Payout')}</TableHead>
+                  <TableHead>{t('Review')}</TableHead>
+                  <TableHead className='text-right'>{t('Actions')}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {withdrawals.length > 0 ? (
+                  withdrawals.map((withdrawal) => (
+                    <GrowthWithdrawalReviewRow
+                      key={withdrawal.id}
+                      withdrawal={withdrawal}
+                      busy={loading || reviewingId === withdrawal.id}
+                      tradeNo={tradeNoById[withdrawal.id] || ''}
+                      note={
+                        withdrawal.status === 'processing'
+                          ? failureNoteById[withdrawal.id] || ''
+                          : reviewNoteById[withdrawal.id] || ''
+                      }
+                      onTradeNoChange={(value) =>
+                        updateTradeNo(withdrawal.id, value)
+                      }
+                      onNoteChange={(value) => {
+                        if (withdrawal.status === 'processing') {
+                          updateFailureNote(withdrawal.id, value)
+                        } else {
+                          updateReviewNote(withdrawal.id, value)
+                        }
+                      }}
+                      onApprove={() =>
+                        setConfirmation({ action: 'approve', withdrawal })
+                      }
+                      onReject={() => requestRejectWithdrawal(withdrawal)}
+                      onInitiate={() => requestInitiatePayout(withdrawal)}
+                      onConfirmPaid={() =>
+                        setConfirmation({ action: 'paid', withdrawal })
+                      }
+                      onFail={() => requestFailWithdrawal(withdrawal)}
+                    />
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell
+                      colSpan={4}
+                      className='text-muted-foreground py-10 text-center'
+                    >
+                      {loading
+                        ? t('Loading...')
+                        : t('No withdrawal requests to review')}
                     </TableCell>
                   </TableRow>
-                )
-              })
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={4}
-                  className='text-muted-foreground py-10 text-center'
-                >
-                  {loading
-                    ? t('Loading...')
-                    : t('No withdrawal requests to review')}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
+                )}
+              </TableBody>
+            </Table>
 
-        <div className='flex flex-wrap items-center justify-between gap-3'>
-          <span className='text-muted-foreground text-xs'>
-            {t('Page {{page}} of {{total}}', {
-              page,
-              total: totalPages,
-            })}
-          </span>
-          <div className='flex gap-2'>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
-              disabled={loading || page <= 1}
-            >
-              {t('Previous')}
-            </Button>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={() =>
-                setPage((current) => Math.min(totalPages, current + 1))
-              }
-              disabled={loading || page >= totalPages}
-            >
-              {t('Next')}
-            </Button>
-          </div>
-        </div>
+            <div className='flex flex-wrap items-center justify-between gap-3'>
+              <span className='text-muted-foreground text-xs'>
+                {t('Page {{page}} of {{total}}', {
+                  page,
+                  total: totalPages,
+                })}
+              </span>
+              <div className='flex gap-2'>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={() => {
+                    setConfirmation(null)
+                    setLoading(true)
+                    setPage((current) => Math.max(1, current - 1))
+                  }}
+                  disabled={loading || page <= 1}
+                >
+                  {t('Previous')}
+                </Button>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={() => {
+                    setConfirmation(null)
+                    setLoading(true)
+                    setPage((current) => Math.min(totalPages, current + 1))
+                  }}
+                  disabled={loading || page >= totalPages}
+                >
+                  {t('Next')}
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
 
         <div className='text-muted-foreground text-xs'>
           {t(
-            'Paid withdrawals close the linked cash commission ledgers and rejected requests return them to withdrawable status.'
+            'Approved requests may still be rejected. Processing payouts must be resolved as paid or failed; a failed payout returns reserved commission to the available balance.'
           )}
         </div>
       </div>
 
-      <AlertDialog
-        open={confirmation !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmation(null)
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{confirmationTitle}</AlertDialogTitle>
-            <AlertDialogDescription>
-              <span className='block space-y-2'>
-                <span className='block'>
-                  {t('User ID')}: {confirmationWithdrawal?.user_id}
-                </span>
-                <span className='block'>{confirmationImpact}</span>
-              </span>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={reviewingId !== null}>
-              {t('Cancel')}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (confirmsPayment) {
-                  void markWithdrawalPaid()
-                } else {
-                  void approveWithdrawal()
-                }
-              }}
-              disabled={reviewingId !== null}
-            >
-              {confirmationAction}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <GrowthWithdrawalConfirmationDialog
+        confirmation={confirmation}
+        tradeNo={
+          confirmation
+            ? tradeNoById[confirmation.withdrawal.id]?.trim() || ''
+            : ''
+        }
+        note={confirmationNote}
+        busy={loading || reviewingId !== null}
+        onCancel={() => setConfirmation(null)}
+        onConfirm={confirmSelectedAction}
+      />
     </SettingsSection>
   )
 }

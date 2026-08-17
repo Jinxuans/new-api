@@ -46,17 +46,15 @@ export type PromotionCommissionSummary = {
 }
 
 export type PromotionCommissionLedger = {
-  id: number
-  source_type: string
-  source_trade_no?: string
   currency: string
   gross_amount_cents: number
+  fee_amount_cents: number
+  tax_amount_cents: number
   net_amount_cents: number
   quota_equivalent: number
   status: string
   available_at?: number | string
   settled_at?: number | string
-  refund_trade_no?: string
   reversal_amount_cents?: number
   reversal_quota?: number
   reversed_at?: number | string
@@ -75,27 +73,41 @@ export type PromotionWithdrawal = {
   trade_no?: string
   applied_at?: number | string
   reviewed_at?: number | string
+  payout_initiated_at?: number | string
   paid_at?: number | string
-  review_note?: string
-}
-
-export type PromotionEvent = {
-  id: number
-  event_type: string
-  source_table?: string
-  source_id?: number
-  direction: string
-  quota_delta?: number
-  cash_amount_cents?: number
-  currency?: string
-  status?: string
-  title?: string
-  remark?: string
   created_at?: number | string
 }
 
+export type PromotionFundTransactionLeg = {
+  account: string
+  asset: 'quota' | 'cash'
+  currency?: string
+  amount: number
+  balance_after?: number | null
+}
+
+export type PromotionFundTransaction = {
+  kind: string
+  source?:
+    | 'registration_reward'
+    | 'growth_reward'
+    | 'invitation_reward'
+    | 'commission'
+    | 'withdrawal'
+    | 'refund'
+    | 'topup'
+    | 'subscription'
+    | 'redemption'
+    | 'admin_adjustment'
+    | 'opening_balance'
+    | 'legacy'
+  external_ref?: string
+  occurred_at?: number | string
+  created_at?: number | string
+  legs: PromotionFundTransactionLeg[]
+}
+
 export type GrowthRewardItem = {
-  id: number
   code: string
   title: string
   description: string
@@ -116,33 +128,30 @@ export type GrowthRewardItem = {
 }
 
 export type GrowthReward = {
-  id: number
   item_code: string
   reward_quota: number
   status: string
+  available_at?: number
   created_at: number
   settled_at?: number
-  remark?: string
 }
 
 export type GrowthSubmission = {
-  id: number
   item_code: string
   platform?: string
   url?: string
+  remark?: string
   status: string
   created_at: number
   review_note?: string
+  reviewed_at?: number
 }
 
 export type InvitationReward = {
-  id: number
-  invitee_id: number
   invitee_name?: string
   reward_type: string
   reward_quota: number
   status: string
-  remark?: string
   created_at: number
   settled_at?: number
   trigger_at?: number
@@ -202,11 +211,6 @@ export function formatTime(value?: number | string) {
   return dayjs(timestamp * 1000).format('YYYY-MM-DD HH:mm')
 }
 
-export function formatCashCents(value?: number, currency = 'CNY') {
-  const amount = Number(value || 0) / 100
-  return `${currency} ${amount.toFixed(2)}`
-}
-
 export function statusVariant(status: string) {
   if (
     status === 'completed' ||
@@ -221,7 +225,8 @@ export function statusVariant(status: string) {
   if (
     status === 'pending' ||
     status === 'pending_review' ||
-    status === 'withdrawing'
+    status === 'withdrawing' ||
+    status === 'processing'
   ) {
     return 'secondary'
   }

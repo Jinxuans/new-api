@@ -48,6 +48,7 @@ import { Route as AuthenticatedModelsIndexRouteImport } from './routes/_authenti
 import { Route as AuthenticatedKeysIndexRouteImport } from './routes/_authenticated/keys/index'
 import { Route as AuthenticatedInviteIndexRouteImport } from './routes/_authenticated/invite/index'
 import { Route as AuthenticatedGrowthIndexRouteImport } from './routes/_authenticated/growth/index'
+import { Route as AuthenticatedFundsOperationsIndexRouteImport } from './routes/_authenticated/funds-operations/index'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
 import { Route as AuthenticatedCreationIndexRouteImport } from './routes/_authenticated/creation/index'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
@@ -278,6 +279,12 @@ const AuthenticatedGrowthIndexRoute =
     path: '/growth/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedFundsOperationsIndexRoute =
+  AuthenticatedFundsOperationsIndexRouteImport.update({
+    id: '/funds-operations/',
+    path: '/funds-operations/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedDashboardIndexRoute =
   AuthenticatedDashboardIndexRouteImport.update({
     id: '/dashboard/',
@@ -447,6 +454,7 @@ export interface FileRoutesByFullPath {
   '/channels/': typeof AuthenticatedChannelsIndexRoute
   '/creation/': typeof AuthenticatedCreationIndexRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
+  '/funds-operations/': typeof AuthenticatedFundsOperationsIndexRoute
   '/growth/': typeof AuthenticatedGrowthIndexRoute
   '/invite/': typeof AuthenticatedInviteIndexRoute
   '/keys/': typeof AuthenticatedKeysIndexRoute
@@ -508,6 +516,7 @@ export interface FileRoutesByTo {
   '/channels': typeof AuthenticatedChannelsIndexRoute
   '/creation': typeof AuthenticatedCreationIndexRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
+  '/funds-operations': typeof AuthenticatedFundsOperationsIndexRoute
   '/growth': typeof AuthenticatedGrowthIndexRoute
   '/invite': typeof AuthenticatedInviteIndexRoute
   '/keys': typeof AuthenticatedKeysIndexRoute
@@ -573,6 +582,7 @@ export interface FileRoutesById {
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
   '/_authenticated/creation/': typeof AuthenticatedCreationIndexRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
+  '/_authenticated/funds-operations/': typeof AuthenticatedFundsOperationsIndexRoute
   '/_authenticated/growth/': typeof AuthenticatedGrowthIndexRoute
   '/_authenticated/invite/': typeof AuthenticatedInviteIndexRoute
   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
@@ -637,6 +647,7 @@ export interface FileRouteTypes {
     | '/channels/'
     | '/creation/'
     | '/dashboard/'
+    | '/funds-operations/'
     | '/growth/'
     | '/invite/'
     | '/keys/'
@@ -698,6 +709,7 @@ export interface FileRouteTypes {
     | '/channels'
     | '/creation'
     | '/dashboard'
+    | '/funds-operations'
     | '/growth'
     | '/invite'
     | '/keys'
@@ -762,6 +774,7 @@ export interface FileRouteTypes {
     | '/_authenticated/channels/'
     | '/_authenticated/creation/'
     | '/_authenticated/dashboard/'
+    | '/_authenticated/funds-operations/'
     | '/_authenticated/growth/'
     | '/_authenticated/invite/'
     | '/_authenticated/keys/'
@@ -1087,6 +1100,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedGrowthIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/funds-operations/': {
+      id: '/_authenticated/funds-operations/'
+      path: '/funds-operations'
+      fullPath: '/funds-operations/'
+      preLoaderRoute: typeof AuthenticatedFundsOperationsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/dashboard/': {
       id: '/_authenticated/dashboard/'
       path: '/dashboard'
@@ -1345,6 +1365,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
   AuthenticatedCreationIndexRoute: typeof AuthenticatedCreationIndexRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
+  AuthenticatedFundsOperationsIndexRoute: typeof AuthenticatedFundsOperationsIndexRoute
   AuthenticatedGrowthIndexRoute: typeof AuthenticatedGrowthIndexRoute
   AuthenticatedInviteIndexRoute: typeof AuthenticatedInviteIndexRoute
   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
@@ -1372,6 +1393,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
   AuthenticatedCreationIndexRoute: AuthenticatedCreationIndexRoute,
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
+  AuthenticatedFundsOperationsIndexRoute:
+    AuthenticatedFundsOperationsIndexRoute,
   AuthenticatedGrowthIndexRoute: AuthenticatedGrowthIndexRoute,
   AuthenticatedInviteIndexRoute: AuthenticatedInviteIndexRoute,
   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,

@@ -17,12 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   API,
   copy,
   formatDateTimeString,
+  formatMinorAmount,
   getCurrencyConfig,
   getQuotaPerUnit,
   renderQuota,
@@ -30,11 +38,16 @@ import {
   showError,
   showSuccess,
 } from '../../helpers';
-import { displayAmountToQuota, quotaToDisplayAmount } from '../../helpers/quota';
+import {
+  displayAmountToQuota,
+  quotaToDisplayAmount,
+} from '../../helpers/quota';
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
 import InvitationCard from '../topup/InvitationCard';
 import TransferModal from '../topup/modals/TransferModal';
+
+const PAGE_SIZE = 10;
 
 const InvitationRewardsPanel = ({ className = '' }) => {
   const { t } = useTranslation();
@@ -43,13 +56,25 @@ const InvitationRewardsPanel = ({ className = '' }) => {
   const [affLink, setAffLink] = useState('');
   const [openTransfer, setOpenTransfer] = useState(false);
   const [transferAmount, setTransferAmount] = useState(0);
+  const [complianceState, setComplianceState] = useState('loading');
+
   const [invitationRecords, setInvitationRecords] = useState([]);
   const [invitationRecordsLoading, setInvitationRecordsLoading] =
     useState(false);
+  const [invitationRecordsError, setInvitationRecordsError] = useState('');
+  const [invitationRecordsPage, setInvitationRecordsPage] = useState(1);
+  const [invitationRecordsTotal, setInvitationRecordsTotal] = useState(0);
+
   const [invitationRebates, setInvitationRebates] = useState([]);
   const [invitationRebatesLoading, setInvitationRebatesLoading] =
     useState(false);
+  const [invitationRebatesError, setInvitationRebatesError] = useState('');
+  const [invitationRebatesPage, setInvitationRebatesPage] = useState(1);
+  const [invitationRebatesTotal, setInvitationRebatesTotal] = useState(0);
+
   const affFetchedRef = useRef(false);
+  const invitationRecordsRequestRef = useRef(0);
+  const invitationRebatesRequestRef = useRef(0);
   const minTransferAmount = useMemo(
     () => quotaToDisplayAmount(getQuotaPerUnit()),
     [],
@@ -58,81 +83,164 @@ const InvitationRewardsPanel = ({ className = '' }) => {
   const inviteRebatePercentageText = useMemo(() => {
     const rawValue = statusState?.status?.invite_rebate_percentage;
     const parsedValue = Number.parseFloat(rawValue);
-    const safeValue = Number.isFinite(parsedValue) ? parsedValue : 10;
-    return Number.isInteger(safeValue)
-      ? String(safeValue)
-      : safeValue.toFixed(1).replace(/\.0$/, '');
+    if (!Number.isFinite(parsedValue)) {
+      return '—';
+    }
+    return Number.isInteger(parsedValue)
+      ? String(parsedValue)
+      : parsedValue.toFixed(1).replace(/\.0$/, '');
   }, [statusState?.status?.invite_rebate_percentage]);
 
   const inviteRewardDisplayText = useMemo(() => {
     const quota = Number.parseFloat(statusState?.status?.quota_for_inviter);
-    const safeQuota = Number.isFinite(quota) ? quota : 0;
-    return renderQuota(safeQuota);
+    return Number.isFinite(quota) ? renderQuota(quota) : '—';
   }, [statusState?.status?.quota_for_inviter]);
 
-  const getUserQuota = async () => {
-    const res = await API.get('/api/user/self');
-    const { success, message, data } = res.data;
-    if (success) {
-      userDispatch({ type: 'login', payload: data });
-      setUserData(data);
-    } else {
-      showError(message);
-    }
-  };
-
-  const getAffLink = async () => {
-    const res = await API.get('/api/user/aff', {
-      params: { _ts: Date.now() },
-    });
-    const { success, message, data } = res.data;
-    if (success) {
-      setAffLink(`${window.location.origin}/register?aff=${data}`);
-    } else {
-      showError(message);
-    }
-  };
-
-  const getInvitationRecords = async () => {
+  const getUserQuota = useCallback(async () => {
     try {
+      const res = await API.get('/api/user/self');
+      const { success, message, data } = res.data;
+      if (success) {
+        userDispatch({ type: 'login', payload: data });
+        setUserData(data);
+      } else {
+        showError(message || t('加载账户余额失败'));
+      }
+    } catch (error) {
+      showError(
+        error?.response?.data?.message ||
+          error?.message ||
+          t('加载账户余额失败'),
+      );
+    }
+  }, [t, userDispatch]);
+
+  const getPaymentComplianceStatus = useCallback(async () => {
+    setComplianceState('loading');
+    try {
+      const res = await API.get('/api/user/topup/info');
+      const { success, data } = res.data;
+      if (!success || !data) {
+        setComplianceState('error');
+        return;
+      }
+      setComplianceState(
+        data.payment_compliance_confirmed === true ? 'confirmed' : 'blocked',
+      );
+    } catch {
+      setComplianceState('error');
+    }
+  }, []);
+
+  const getAffLink = useCallback(async () => {
+    try {
+      const res = await API.get('/api/user/aff', {
+        params: { _ts: Date.now() },
+      });
+      const { success, message, data } = res.data;
+      if (success) {
+        setAffLink(`${window.location.origin}/register?aff=${data}`);
+      } else {
+        showError(message || t('加载邀请链接失败'));
+      }
+    } catch (error) {
+      showError(
+        error?.response?.data?.message ||
+          error?.message ||
+          t('加载邀请链接失败'),
+      );
+    }
+  }, [t]);
+
+  const getInvitationRecords = useCallback(
+    async (requestedPage) => {
+      const requestId = ++invitationRecordsRequestRef.current;
       setInvitationRecordsLoading(true);
-      const res = await API.get('/api/user/aff/records', {
-        params: {
-          page_size: 100,
-          _ts: Date.now(),
-        },
-      });
-      const { success, message, data } = res.data;
-      if (success) {
+      setInvitationRecordsError('');
+      try {
+        const res = await API.get('/api/user/aff/records', {
+          params: {
+            p: requestedPage,
+            page_size: PAGE_SIZE,
+            _ts: Date.now(),
+          },
+        });
+        if (requestId !== invitationRecordsRequestRef.current) {
+          return;
+        }
+        const { success, message, data } = res.data;
+        if (!success) {
+          setInvitationRecords([]);
+          setInvitationRecordsTotal(0);
+          setInvitationRecordsError(message || t('加载邀请记录失败'));
+          return;
+        }
         setInvitationRecords(data?.items || []);
-        getUserQuota().then();
-      } else {
-        showError(message);
+        setInvitationRecordsTotal(Number(data?.total) || 0);
+      } catch (error) {
+        if (requestId !== invitationRecordsRequestRef.current) {
+          return;
+        }
+        setInvitationRecords([]);
+        setInvitationRecordsTotal(0);
+        setInvitationRecordsError(
+          error?.response?.data?.message ||
+            error?.message ||
+            t('加载邀请记录失败'),
+        );
+      } finally {
+        if (requestId === invitationRecordsRequestRef.current) {
+          setInvitationRecordsLoading(false);
+        }
       }
-    } finally {
-      setInvitationRecordsLoading(false);
-    }
-  };
+    },
+    [t],
+  );
 
-  const getInvitationRebates = async () => {
-    try {
+  const getInvitationRebates = useCallback(
+    async (requestedPage) => {
+      const requestId = ++invitationRebatesRequestRef.current;
       setInvitationRebatesLoading(true);
-      const res = await API.get('/api/user/aff/rebates', {
-        params: {
-          page_size: 100,
-          _ts: Date.now(),
-        },
-      });
-      const { success, message, data } = res.data;
-      if (success) {
+      setInvitationRebatesError('');
+      try {
+        const res = await API.get('/api/user/aff/rebates', {
+          params: {
+            p: requestedPage,
+            page_size: PAGE_SIZE,
+            _ts: Date.now(),
+          },
+        });
+        if (requestId !== invitationRebatesRequestRef.current) {
+          return;
+        }
+        const { success, message, data } = res.data;
+        if (!success) {
+          setInvitationRebates([]);
+          setInvitationRebatesTotal(0);
+          setInvitationRebatesError(message || t('加载返佣明细失败'));
+          return;
+        }
         setInvitationRebates(data?.items || []);
-      } else {
-        showError(message);
+        setInvitationRebatesTotal(Number(data?.total) || 0);
+      } catch (error) {
+        if (requestId !== invitationRebatesRequestRef.current) {
+          return;
+        }
+        setInvitationRebates([]);
+        setInvitationRebatesTotal(0);
+        setInvitationRebatesError(
+          error?.response?.data?.message ||
+            error?.message ||
+            t('加载返佣明细失败'),
+        );
+      } finally {
+        if (requestId === invitationRebatesRequestRef.current) {
+          setInvitationRebatesLoading(false);
+        }
       }
-    } finally {
-      setInvitationRebatesLoading(false);
-    }
-  };
+    },
+    [t],
+  );
 
   const transfer = async () => {
     const transferQuota = displayAmountToQuota(transferAmount);
@@ -140,16 +248,22 @@ const InvitationRewardsPanel = ({ className = '' }) => {
       showError(t('划转金额最低为') + ' ' + renderQuota(getQuotaPerUnit()));
       return;
     }
-    const res = await API.post('/api/user/aff_transfer', {
-      quota: transferQuota,
-    });
-    const { success, message } = res.data;
-    if (success) {
-      showSuccess(message);
-      setOpenTransfer(false);
-      getUserQuota().then();
-    } else {
-      showError(message);
+    try {
+      const res = await API.post('/api/user/aff_transfer', {
+        quota: transferQuota,
+      });
+      const { success, message } = res.data;
+      if (success) {
+        showSuccess(message);
+        setOpenTransfer(false);
+        await getUserQuota();
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(
+        error?.response?.data?.message || error?.message || t('划转失败'),
+      );
     }
   };
 
@@ -158,22 +272,34 @@ const InvitationRewardsPanel = ({ className = '' }) => {
     showSuccess(t('邀请链接已复制到剪切板'));
   };
 
-  const handleTransferCancel = () => {
-    setOpenTransfer(false);
-  };
+  useEffect(() => {
+    setTransferAmount(minTransferAmount);
+    void getUserQuota();
+    void getPaymentComplianceStatus();
+  }, [getPaymentComplianceStatus, getUserQuota, minTransferAmount]);
 
   useEffect(() => {
-    getUserQuota().then();
-    getInvitationRecords().then();
-    getInvitationRebates().then();
-    setTransferAmount(minTransferAmount);
-  }, [minTransferAmount]);
+    void getInvitationRecords(invitationRecordsPage);
+  }, [getInvitationRecords, invitationRecordsPage]);
+
+  useEffect(() => {
+    void getInvitationRebates(invitationRebatesPage);
+  }, [getInvitationRebates, invitationRebatesPage]);
 
   useEffect(() => {
     if (affFetchedRef.current) return;
     affFetchedRef.current = true;
-    getAffLink().then();
-  }, []);
+    void getAffLink();
+  }, [getAffLink]);
+
+  let complianceMessage = '';
+  if (complianceState === 'loading') {
+    complianceMessage = t('正在确认邀请奖励可用状态，划转暂不可用。');
+  } else if (complianceState === 'blocked') {
+    complianceMessage = t('邀请奖励划转已禁用，管理员需先确认合规声明。');
+  } else if (complianceState === 'error') {
+    complianceMessage = t('无法确认邀请奖励可用状态，请稍后重试。');
+  }
 
   return (
     <div className={className}>
@@ -181,12 +307,14 @@ const InvitationRewardsPanel = ({ className = '' }) => {
         t={t}
         openTransfer={openTransfer}
         transfer={transfer}
-        handleTransferCancel={handleTransferCancel}
+        handleTransferCancel={() => setOpenTransfer(false)}
         userState={userState}
         renderQuota={renderQuota}
         getQuotaPerUnit={getQuotaPerUnit}
         minTransferAmount={minTransferAmount}
-        maxTransferAmount={quotaToDisplayAmount(userState?.user?.aff_quota || 0)}
+        maxTransferAmount={quotaToDisplayAmount(
+          userState?.user?.aff_quota || 0,
+        )}
         quotaDisplayType={getCurrencyConfig().type}
         transferAmount={transferAmount}
         setTransferAmount={setTransferAmount}
@@ -198,15 +326,41 @@ const InvitationRewardsPanel = ({ className = '' }) => {
         setOpenTransfer={setOpenTransfer}
         affLink={affLink}
         handleAffLinkClick={handleAffLinkClick}
+        complianceConfirmed={complianceState === 'confirmed'}
+        complianceMessage={complianceMessage}
         inviteRebatePercentageText={inviteRebatePercentageText}
         inviteRewardDisplayText={inviteRewardDisplayText}
         invitationRecords={invitationRecords}
         invitationRecordsLoading={invitationRecordsLoading}
+        invitationRecordsError={invitationRecordsError}
+        invitationRecordsPage={invitationRecordsPage}
+        invitationRecordsPageSize={PAGE_SIZE}
+        invitationRecordsTotal={invitationRecordsTotal}
+        onInvitationRecordsPageChange={setInvitationRecordsPage}
+        onRetryInvitationRecords={() =>
+          getInvitationRecords(invitationRecordsPage)
+        }
         invitationRebates={invitationRebates}
         invitationRebatesLoading={invitationRebatesLoading}
-        formatInviteRebateAmount={(amount) => {
-          const { symbol } = getCurrencyConfig();
-          return `${symbol}${(Number.parseFloat(amount) || 0).toFixed(2)}`;
+        invitationRebatesError={invitationRebatesError}
+        invitationRebatesPage={invitationRebatesPage}
+        invitationRebatesPageSize={PAGE_SIZE}
+        invitationRebatesTotal={invitationRebatesTotal}
+        onInvitationRebatesPageChange={setInvitationRebatesPage}
+        onRetryInvitationRebates={() =>
+          getInvitationRebates(invitationRebatesPage)
+        }
+        formatInviteRebateAmount={(record) => {
+          if (record?.cashable === false) {
+            return renderQuota(record?.rebate_quota || 0);
+          }
+          if (!record?.rebate_currency) {
+            return t('币种未记录');
+          }
+          return formatMinorAmount(
+            record?.rebate_amount_minor,
+            record.rebate_currency,
+          );
         }}
         formatDateTime={(timestamp) => {
           const numeric = Number.parseInt(timestamp, 10);

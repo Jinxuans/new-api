@@ -54,33 +54,19 @@ type InvitationRebate struct {
 }
 
 type UserInvitationRebateRecord struct {
-	Id                   int     `json:"id"`
-	InviteeId            int     `json:"invitee_id"`
-	InviteeName          string  `json:"invitee_name"`
-	TradeNo              string  `json:"trade_no"`
-	TopUpMoney           float64 `json:"top_up_money"`
-	PaymentMethod        string  `json:"payment_method"`
-	PaymentProvider      string  `json:"payment_provider"`
-	PaidAmountMinor      int64   `json:"paid_amount_minor"`
-	PaidCurrency         string  `json:"paid_currency"`
-	PaidAmountVerified   bool    `json:"paid_amount_verified"`
-	RebatePercentage     float64 `json:"rebate_percentage"`
-	QuotaPerUnitSnapshot float64 `json:"quota_per_unit_snapshot"`
-	RebateAmount         float64 `json:"rebate_amount"`
-	RebateAmountMinor    int64   `json:"rebate_amount_minor"`
-	RebateCurrency       string  `json:"rebate_currency"`
-	Cashable             bool    `json:"cashable"`
-	RebateQuota          int     `json:"rebate_quota"`
-	FreezeDays           int     `json:"freeze_days"`
-	SettleAfter          int64   `json:"settle_after"`
-	RiskStatus           string  `json:"risk_status"`
-	RefundTradeNo        string  `json:"refund_trade_no"`
-	ReversalQuota        int     `json:"reversal_quota"`
-	ReversedAt           int64   `json:"reversed_at"`
-	Remark               string  `json:"remark"`
-	Status               string  `json:"status"`
-	CreatedAt            int64   `json:"created_at"`
-	SettledAt            int64   `json:"settled_at"`
+	InviteeName       string  `json:"invitee_name"`
+	RebatePercentage  float64 `json:"rebate_percentage"`
+	RebateAmount      float64 `json:"rebate_amount"`
+	RebateAmountMinor int64   `json:"rebate_amount_minor"`
+	RebateCurrency    string  `json:"rebate_currency"`
+	Cashable          bool    `json:"cashable"`
+	RebateQuota       int     `json:"rebate_quota"`
+	SettleAfter       int64   `json:"settle_after"`
+	ReversalQuota     int     `json:"reversal_quota"`
+	ReversedAt        int64   `json:"reversed_at"`
+	Status            string  `json:"status"`
+	CreatedAt         int64   `json:"created_at"`
+	SettledAt         int64   `json:"settled_at"`
 }
 
 func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, error) {
@@ -90,10 +76,10 @@ func SettleInvitationRebateTx(tx *gorm.DB, topUp *TopUp) (*InvitationRebate, err
 	if topUp == nil {
 		return nil, errors.New("topup is required")
 	}
-	if topUp.Id == 0 || topUp.Status != common.TopUpStatusSuccess {
+	if topUp.Id == 0 || topUp.Purpose != TopUpPurposeAPIBalance || topUp.Status != common.TopUpStatusSuccess {
 		return nil, nil
 	}
-	if topUp.RefundStatus == TopUpRefundStatusFull || topUp.RefundStatus == TopUpRefundStatusDisputed {
+	if topUp.RefundStatus != "" {
 		return nil, nil
 	}
 	percentage := operation_setting.GetInviteRebatePercentage()
@@ -548,7 +534,7 @@ func GetUserInvitationRebateRecords(inviterId int, pageInfo *common.PageInfo) (
 	}
 
 	err = tx.Table("invitation_rebates").
-		Select("invitation_rebates.id, invitation_rebates.invitee_id, invitation_rebates.trade_no, invitation_rebates.top_up_money, invitation_rebates.payment_method, invitation_rebates.payment_provider, invitation_rebates.rebate_percentage, invitation_rebates.quota_per_unit_snapshot, invitation_rebates.rebate_amount, invitation_rebates.rebate_quota, invitation_rebates.freeze_days, invitation_rebates.settle_after, invitation_rebates.risk_status, invitation_rebates.refund_trade_no, invitation_rebates.reversal_quota, invitation_rebates.reversed_at, invitation_rebates.remark, invitation_rebates.status, invitation_rebates.created_at, invitation_rebates.settled_at, COALESCE(NULLIF(users.display_name, ''), users.username) AS invitee_name").
+		Select("invitation_rebates.rebate_percentage, invitation_rebates.rebate_amount, invitation_rebates.rebate_amount_minor, invitation_rebates.rebate_currency, invitation_rebates.cashable, invitation_rebates.rebate_quota, invitation_rebates.settle_after, invitation_rebates.reversal_quota, invitation_rebates.reversed_at, invitation_rebates.status, invitation_rebates.created_at, invitation_rebates.settled_at, COALESCE(NULLIF(users.display_name, ''), users.username) AS invitee_name").
 		Joins("LEFT JOIN users ON users.id = invitation_rebates.invitee_id").
 		Where("invitation_rebates.inviter_id = ?", inviterId).
 		Order("invitation_rebates.id DESC").
@@ -581,12 +567,12 @@ func SyncInvitationRebatesForInviter(inviterId int) error {
 	for {
 		var topUps []TopUp
 		err := DB.Table("top_ups").
-			Select("top_ups.id, top_ups.user_id, top_ups.amount, top_ups.money, top_ups.paid_amount_minor, top_ups.paid_currency, top_ups.paid_amount_verified, top_ups.trade_no, top_ups.payment_method, top_ups.payment_provider, top_ups.create_time, top_ups.complete_time, top_ups.status").
+			Select("top_ups.id, top_ups.user_id, top_ups.purpose, top_ups.amount, top_ups.money, top_ups.paid_amount_minor, top_ups.paid_currency, top_ups.paid_amount_verified, top_ups.trade_no, top_ups.payment_method, top_ups.payment_provider, top_ups.create_time, top_ups.complete_time, top_ups.status").
 			Joins("INNER JOIN users ON users.id = top_ups.user_id").
 			Joins("LEFT JOIN invitation_rebates ON invitation_rebates.top_up_id = top_ups.id").
 			Joins("LEFT JOIN subscription_orders ON subscription_orders.trade_no = top_ups.trade_no").
-			Where("users.inviter_id = ? AND top_ups.status = ? AND invitation_rebates.id IS NULL AND subscription_orders.id IS NULL", inviterId, common.TopUpStatusSuccess).
-			Where("top_ups.refund_status IS NULL OR top_ups.refund_status NOT IN ?", []string{TopUpRefundStatusFull, TopUpRefundStatusDisputed}).
+			Where("users.inviter_id = ? AND top_ups.purpose = ? AND top_ups.status = ? AND invitation_rebates.id IS NULL AND subscription_orders.id IS NULL", inviterId, TopUpPurposeAPIBalance, common.TopUpStatusSuccess).
+			Where("top_ups.refund_status IS NULL OR top_ups.refund_status = ?", "").
 			Order("top_ups.id ASC").
 			Limit(200).
 			Scan(&topUps).Error
@@ -598,16 +584,24 @@ func SyncInvitationRebatesForInviter(inviterId int) error {
 		}
 
 		for _, topUp := range topUps {
+			fencedUserIds := newRefundHoldFenceScope()
+			if err = preparePromotionRefundTopUpAccounting(&topUp, fencedUserIds); err != nil {
+				return errors.Join(err, reconcilePromotionRefundHoldFences(fencedUserIds))
+			}
 			err = DB.Transaction(func(tx *gorm.DB) error {
 				lockedTopUp := &TopUp{}
 				if err := lockForUpdate(tx).Where("id = ?", topUp.Id).First(lockedTopUp).Error; err != nil {
 					return err
 				}
 				_, err := SettleInvitationRebateTx(tx, lockedTopUp)
-				return err
+				if err != nil {
+					return err
+				}
+				return reconcilePromotionRefundForTopUpTx(tx, lockedTopUp, fencedUserIds, true)
 			})
-			if err != nil {
-				return err
+			reconcileErr := reconcilePromotionRefundHoldFences(fencedUserIds)
+			if err != nil || reconcileErr != nil {
+				return errors.Join(err, reconcileErr)
 			}
 		}
 	}

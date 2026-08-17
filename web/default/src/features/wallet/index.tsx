@@ -45,6 +45,7 @@ import {
   getMinTopupAmount,
   dispatchSelectedPayment,
 } from './lib'
+import { RefundRecoveryStatus } from './refund-recovery/refund-recovery-status'
 import type {
   UserWalletData,
   PaymentMethod,
@@ -271,6 +272,8 @@ export function Wallet(props: WalletProps) {
         <SectionPageLayout.Content>
           <div className='mx-auto flex w-full max-w-7xl flex-col gap-4 sm:gap-5'>
             <WalletStatsCard user={user} loading={userLoading} />
+
+            <RefundRecoveryStatus />
 
             <div
               className={

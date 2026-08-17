@@ -16,23 +16,27 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Search, Copy, Check, ChevronLeft, ChevronRight } from 'lucide-react'
+import {
+  ArrowLeft01Icon,
+  ArrowRight01Icon,
+  Copy01Icon,
+  SearchIcon,
+  Tick02Icon,
+} from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
 import { StatusBadge } from '@/components/status-badge'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -44,9 +48,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
-import { formatCurrencyFromUSD } from '@/lib/currency'
-import { formatNumber } from '@/lib/format'
+import { formatCurrencyFromUSD, formatMinorAmount } from '@/lib/currency'
+import { formatQuota } from '@/lib/format'
 
 import { useBillingHistory } from '../../hooks/use-billing-history'
 import {
@@ -81,17 +86,29 @@ export function BillingHistoryDialog({
   } = useBillingHistory()
 
   const [confirmTradeNo, setConfirmTradeNo] = useState<string | null>(null)
+  const [completionReason, setCompletionReason] = useState('')
+  const [completionReasonTouched, setCompletionReasonTouched] = useState(false)
   const { copyToClipboard, copiedText } = useCopyToClipboard({ notify: false })
 
   const totalPages = Math.ceil(total / pageSize)
 
   const handleConfirmComplete = async () => {
-    if (confirmTradeNo) {
-      const success = await handleCompleteOrder(confirmTradeNo)
+    const reason = completionReason.trim()
+    if (confirmTradeNo && reason) {
+      const success = await handleCompleteOrder(confirmTradeNo, reason)
       if (success) {
         setConfirmTradeNo(null)
+        setCompletionReason('')
+        setCompletionReasonTouched(false)
       }
     }
+  }
+
+  const closeCompletionDialog = () => {
+    if (completing) return
+    setConfirmTradeNo(null)
+    setCompletionReason('')
+    setCompletionReasonTouched(false)
   }
 
   return (
@@ -100,9 +117,11 @@ export function BillingHistoryDialog({
         open={open}
         onOpenChange={onOpenChange}
         title={t('Billing History')}
-        description={t(
-          'View your topup transaction records and payment history'
-        )}
+        description={
+          isAdmin
+            ? t('View your topup transaction records and payment history')
+            : t('Showing your top-ups from the last 30 days.')
+        }
         contentClassName='flex max-h-[calc(100dvh-2rem)] flex-col max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4 sm:max-w-4xl'
         contentHeight='auto'
         bodyClassName='space-y-3'
@@ -111,9 +130,15 @@ export function BillingHistoryDialog({
           {/* Search and Filter Bar */}
           <div className='flex items-center gap-2'>
             <div className='relative flex-1'>
-              <Search className='text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2' />
+              <HugeiconsIcon
+                icon={SearchIcon}
+                strokeWidth={2}
+                className='text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2'
+                aria-hidden='true'
+              />
               <Input
                 placeholder={t('Search by order number...')}
+                aria-label={t('Search by order number...')}
                 value={keyword}
                 onChange={(e) => handleSearch(e.target.value)}
                 className='h-9 pl-10'
@@ -128,7 +153,7 @@ export function BillingHistoryDialog({
               ]}
               value={pageSize.toString()}
               onValueChange={(value) =>
-                value !== null && handlePageSizeChange(parseInt(value))
+                value !== null && handlePageSizeChange(Number.parseInt(value))
               }
             >
               <SelectTrigger className='h-9 w-[92px] sm:w-32'>
@@ -147,26 +172,32 @@ export function BillingHistoryDialog({
 
           {/* Records List */}
           <div className='max-h-[min(54vh,520px)] overflow-y-auto pr-1'>
-            {loading ? (
+            {loading && (
               <div className='space-y-3'>
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className='rounded-lg border p-3 sm:p-4'>
-                    <div className='flex items-start justify-between'>
-                      <div className='flex-1 space-y-2'>
-                        <Skeleton className='h-4 w-48' />
-                        <Skeleton className='h-3 w-32' />
+                {['first', 'second', 'third', 'fourth', 'fifth'].map(
+                  (skeletonKey) => (
+                    <div
+                      key={skeletonKey}
+                      className='rounded-lg border p-3 sm:p-4'
+                    >
+                      <div className='flex items-start justify-between'>
+                        <div className='flex-1 space-y-2'>
+                          <Skeleton className='h-4 w-48' />
+                          <Skeleton className='h-3 w-32' />
+                        </div>
+                        <Skeleton className='h-5 w-16' />
                       </div>
-                      <Skeleton className='h-5 w-16' />
+                      <div className='mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4'>
+                        <Skeleton className='h-3 w-full' />
+                        <Skeleton className='h-3 w-full' />
+                        <Skeleton className='h-3 w-full' />
+                      </div>
                     </div>
-                    <div className='mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4'>
-                      <Skeleton className='h-3 w-full' />
-                      <Skeleton className='h-3 w-full' />
-                      <Skeleton className='h-3 w-full' />
-                    </div>
-                  </div>
-                ))}
+                  )
+                )}
               </div>
-            ) : records.length === 0 ? (
+            )}
+            {!loading && records.length === 0 && (
               <div className='text-muted-foreground flex min-h-40 flex-col items-center justify-center py-10 text-center'>
                 <p className='text-sm font-medium'>
                   {t('No billing records found')}
@@ -177,10 +208,30 @@ export function BillingHistoryDialog({
                     : t('Your transaction history will appear here')}
                 </p>
               </div>
-            ) : (
+            )}
+            {!loading && records.length > 0 && (
               <div className='space-y-3'>
                 {records.map((record) => {
                   const statusConfig = getStatusConfig(record.status)
+                  const isSubscription = record.purpose === 'subscription'
+                  let refundStatusLabel = ''
+                  if (record.refund_status === 'partial') {
+                    refundStatusLabel = 'Partially refunded'
+                  } else if (record.refund_status === 'full') {
+                    refundStatusLabel = 'Fully refunded'
+                  } else if (record.refund_status === 'disputed') {
+                    refundStatusLabel = 'Payment disputed'
+                  }
+                  let creditedValue = t('Subscription entitlement')
+                  if (!isSubscription && record.credited_quota != null) {
+                    creditedValue = formatQuota(record.credited_quota)
+                  } else if (!isSubscription) {
+                    creditedValue = formatCurrencyFromUSD(record.amount, {
+                      digitsLarge: 2,
+                      digitsSmall: 2,
+                      abbreviate: false,
+                    })
+                  }
                   return (
                     <div
                       key={record.id}
@@ -196,13 +247,20 @@ export function BillingHistoryDialog({
                             <Button
                               variant='ghost'
                               size='sm'
-                              className='h-5 w-5 p-0'
+                              className='size-7 p-0'
                               onClick={() => copyToClipboard(record.trade_no)}
+                              aria-label={t('Copy order number')}
                             >
                               {copiedText === record.trade_no ? (
-                                <Check className='h-3 w-3' />
+                                <HugeiconsIcon
+                                  icon={Tick02Icon}
+                                  strokeWidth={2}
+                                />
                               ) : (
-                                <Copy className='h-3 w-3' />
+                                <HugeiconsIcon
+                                  icon={Copy01Icon}
+                                  strokeWidth={2}
+                                />
                               )}
                             </Button>
                             {isAdmin && record.user_id != null && (
@@ -218,16 +276,29 @@ export function BillingHistoryDialog({
                             {formatTimestamp(record.create_time)}
                           </div>
                         </div>
-                        <StatusBadge
-                          label={statusConfig.label}
-                          variant={statusConfig.variant}
-                          showDot
-                          copyable={false}
-                        />
+                        <div className='flex flex-wrap justify-end gap-1.5'>
+                          <StatusBadge
+                            label={t(statusConfig.label)}
+                            variant={statusConfig.variant}
+                            showDot
+                            copyable={false}
+                          />
+                          {refundStatusLabel ? (
+                            <StatusBadge
+                              label={t(refundStatusLabel)}
+                              variant={
+                                record.refund_status === 'partial'
+                                  ? 'warning'
+                                  : 'danger'
+                              }
+                              copyable={false}
+                            />
+                          ) : null}
+                        </div>
                       </div>
 
                       {/* Details Grid */}
-                      <div className='mt-3 grid grid-cols-2 gap-3 sm:mt-4 sm:grid-cols-3 sm:gap-4'>
+                      <div className='mt-3 grid grid-cols-2 gap-3 sm:mt-4 sm:grid-cols-4 sm:gap-4'>
                         <div className='space-y-1'>
                           <Label className='text-muted-foreground text-xs'>
                             {t('Payment Method')}
@@ -238,25 +309,72 @@ export function BillingHistoryDialog({
                         </div>
                         <div className='space-y-1'>
                           <Label className='text-muted-foreground text-xs'>
-                            {t('Amount')}
+                            {t('Purpose')}
                           </Label>
-                          <div className='text-sm font-semibold'>
-                            {formatCurrencyFromUSD(record.amount, {
-                              digitsLarge: 2,
-                              digitsSmall: 2,
-                              abbreviate: false,
-                            })}
+                          <div className='text-sm font-medium'>
+                            {t(
+                              isSubscription
+                                ? 'Subscription purchase'
+                                : 'API balance top-up'
+                            )}
                           </div>
                         </div>
                         <div className='space-y-1'>
                           <Label className='text-muted-foreground text-xs'>
-                            {t('Payment')}
+                            {t('Paid amount')}
                           </Label>
-                          <div className='text-sm font-semibold text-red-600'>
-                            {formatNumber(record.money)}
+                          <div className='text-sm font-semibold tabular-nums'>
+                            {record.paid_amount_verified &&
+                            record.paid_currency &&
+                            record.paid_amount_minor != null
+                              ? formatMinorAmount(
+                                  record.paid_amount_minor,
+                                  record.paid_currency
+                                )
+                              : t('Payment details unavailable')}
+                          </div>
+                        </div>
+                        <div className='space-y-1'>
+                          <Label className='text-muted-foreground text-xs'>
+                            {isSubscription
+                              ? t('Purchased item')
+                              : t('Credited API balance')}
+                          </Label>
+                          <div className='text-sm font-semibold tabular-nums'>
+                            {creditedValue}
                           </div>
                         </div>
                       </div>
+
+                      {record.refund_status ? (
+                        <div className='bg-muted/40 mt-3 grid grid-cols-1 gap-2 rounded-md p-3 sm:grid-cols-2'>
+                          <div>
+                            <div className='text-muted-foreground text-xs'>
+                              {t('Refunded amount')}
+                            </div>
+                            <div className='mt-0.5 text-sm font-medium tabular-nums'>
+                              {record.paid_currency &&
+                              record.refunded_amount_minor != null
+                                ? formatMinorAmount(
+                                    record.refunded_amount_minor,
+                                    record.paid_currency
+                                  )
+                                : t('Payment details unavailable')}
+                            </div>
+                          </div>
+                          {record.refunded_quota != null &&
+                          record.refunded_quota > 0 ? (
+                            <div>
+                              <div className='text-muted-foreground text-xs'>
+                                {t('Refunded API balance')}
+                              </div>
+                              <div className='mt-0.5 text-sm font-medium tabular-nums'>
+                                {formatQuota(record.refunded_quota)}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
 
                       {/* Admin Actions */}
                       {isAdmin && record.status === 'pending' && (
@@ -292,8 +410,9 @@ export function BillingHistoryDialog({
                   onClick={() => handlePageChange(page - 1)}
                   disabled={page <= 1}
                   className='h-8 w-8 p-0'
+                  aria-label={t('Previous page')}
                 >
-                  <ChevronLeft className='h-4 w-4' />
+                  <HugeiconsIcon icon={ArrowLeft01Icon} strokeWidth={2} />
                 </Button>
                 <div className='text-muted-foreground flex items-center gap-1 text-sm'>
                   <span className='font-medium'>{page}</span>
@@ -306,8 +425,9 @@ export function BillingHistoryDialog({
                   onClick={() => handlePageChange(page + 1)}
                   disabled={page >= totalPages}
                   className='h-8 w-8 p-0'
+                  aria-label={t('Next page')}
                 >
-                  <ChevronRight className='h-4 w-4' />
+                  <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} />
                 </Button>
               </div>
             </div>
@@ -315,33 +435,65 @@ export function BillingHistoryDialog({
         </div>
       </Dialog>
 
-      {/* Confirm Complete Order Dialog */}
-      <AlertDialog
+      <Dialog
         open={!!confirmTradeNo}
-        onOpenChange={(open) => !open && setConfirmTradeNo(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('Complete Order')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t(
-                'Are you sure you want to manually complete this order? The user will be credited with the corresponding quota.'
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={completing}>
-              {t('Cancel')}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleConfirmComplete}
+        onOpenChange={(open) => !open && closeCompletionDialog()}
+        title={t('Complete Order')}
+        description={t(
+          'Are you sure you want to manually complete this order? The user will be credited with the corresponding quota.'
+        )}
+        contentClassName='sm:max-w-lg'
+        footer={
+          <>
+            <Button
+              type='button'
+              variant='outline'
               disabled={completing}
+              onClick={closeCompletionDialog}
+            >
+              {t('Cancel')}
+            </Button>
+            <Button
+              type='button'
+              disabled={completing || completionReason.trim() === ''}
+              onClick={handleConfirmComplete}
             >
               {completing ? t('Processing...') : t('Confirm')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </>
+        }
+      >
+        <FieldGroup>
+          <Field
+            data-invalid={
+              (completionReasonTouched && completionReason.trim() === '') ||
+              undefined
+            }
+          >
+            <FieldLabel htmlFor='manual-topup-reason'>{t('Reason')}</FieldLabel>
+            <Textarea
+              id='manual-topup-reason'
+              value={completionReason}
+              maxLength={1000}
+              className='min-h-24'
+              aria-invalid={
+                (completionReasonTouched && completionReason.trim() === '') ||
+                undefined
+              }
+              disabled={completing}
+              required
+              onBlur={() => setCompletionReasonTouched(true)}
+              onChange={(event) => setCompletionReason(event.target.value)}
+            />
+            <FieldDescription>
+              {t('Explain the evidence and decision for the audit record.')}
+            </FieldDescription>
+            {completionReasonTouched && completionReason.trim() === '' ? (
+              <FieldError>{t('Reason is required.')}</FieldError>
+            ) : null}
+          </Field>
+        </FieldGroup>
+      </Dialog>
     </>
   )
 }

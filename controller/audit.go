@@ -30,6 +30,8 @@ var auditContentTemplates = map[string]string{
 	"user.reset_passkey":         "Reset the user passkey",
 	"option.update":              "Updated system setting ${key}",
 	"growth.config.update":       "Updated growth configuration ${sections}",
+	"growth.refund_case.create":  "Created promotion refund case ${case_id}",
+	"growth.refund_case.action":  "Applied ${action} to promotion refund case ${id}",
 	"growth.refund_case.resolve": "Resolved promotion refund case ${id}",
 
 	"channel.create":             "Created channel ${name} (type ${type}, count ${count})",
@@ -49,8 +51,10 @@ var auditContentTemplates = map[string]string{
 
 	"redemption.create": "Created ${count} redemption codes named ${name} (${quota} each)",
 
-	"subscription.plan_reset":      "Reset active subscriptions for plan ${plan_id}",
-	"subscription.user_plan_reset": "Reset active plan ${plan_id} subscriptions for user ${target_user_id}",
+	"subscription.plan_reset":             "Reset active subscriptions for plan ${plan_id}",
+	"subscription.user_plan_reset":        "Reset active plan ${plan_id} subscriptions for user ${target_user_id}",
+	"subscription.entitlement_grant":      "Granted subscription plan ${plan_id} to user ${target_user_id}",
+	"subscription.entitlement_invalidate": "Invalidated subscription entitlement ${subscription_id} for user ${target_user_id}",
 }
 
 // auditContentEN 按 action 模板渲染英文兜底文本；未登记的 action 退回 action 本身。

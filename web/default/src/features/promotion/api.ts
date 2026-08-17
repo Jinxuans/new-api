@@ -25,7 +25,7 @@ import type {
   GrowthSummary,
   InvitationReward,
   PromotionCommissionLedger,
-  PromotionEvent,
+  PromotionFundTransaction,
   PromotionWithdrawal,
 } from '@/features/promotion/shared'
 import { getAffiliateCode, transferAffiliateQuota } from '@/features/wallet/api'
@@ -59,7 +59,7 @@ export type PromotionReferralTools = {
 export type PromotionOverview = GrowthSummary
 
 export type PromotionActivityFilter =
-  | 'all'
+  | 'funds'
   | 'tasks'
   | 'submissions'
   | 'referrals'
@@ -67,7 +67,7 @@ export type PromotionActivityFilter =
   | 'withdrawals'
 
 export type PromotionActivityItem =
-  | PromotionEvent
+  | PromotionFundTransaction
   | GrowthReward
   | GrowthSubmission
   | InvitationReward
@@ -92,6 +92,13 @@ export type PromotionWithdrawalInput = {
   payout_method: string
   payout_account: string
   remark: string
+  expected_amount_cents: number
+  expected_quota_equivalent: number
+}
+
+export type PromotionCommissionBalanceExpectation = {
+  expected_amount_cents: number
+  expected_quota_equivalent: number
 }
 
 export const promotionQueryKeys = {
@@ -195,7 +202,7 @@ export async function getPromotionActivity(
   pageSize: number
 ): Promise<PromotionActivityPage> {
   const endpointByFilter: Record<PromotionActivityFilter, string> = {
-    all: '/api/growth/events',
+    funds: '/api/growth/fund-records',
     tasks: '/api/growth/rewards',
     submissions: '/api/growth/submissions',
     referrals: '/api/user/aff/rewards',
@@ -235,8 +242,10 @@ export async function transferAllReferralCredit(quota: number): Promise<void> {
   ensureSuccess(response, t('Unable to transfer referral credit'))
 }
 
-export async function convertAllCashToBalance(): Promise<number> {
-  const response = await api.post('/api/growth/commissions/transfer')
+export async function convertAllCashToBalance(
+  expected: PromotionCommissionBalanceExpectation
+): Promise<number> {
+  const response = await api.post('/api/growth/commissions/transfer', expected)
   const data = unwrap<{ quota?: number }>(
     response.data,
     t('Unable to convert cash commission')

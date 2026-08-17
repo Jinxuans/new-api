@@ -32,6 +32,7 @@ auth.user_id_not_provided: "無權進行此操作，未提供 New-Api-User"
 auth.user_id_format_error: "無權進行此操作，New-Api-User 格式錯誤"
 auth.user_id_mismatch: "無權進行此操作，New-Api-User 與登入使用者不匹配"
 auth.user_banned: "使用者已被封禁"
+auth.refund_hold: "退款或拒付追償尚未處理完成，API 存取已暫停，請聯絡管理員。"
 auth.insufficient_privilege: "無權進行此操作，權限不足"
 
 # Token messages
@@ -63,6 +64,7 @@ redemption.expired: "該兌換碼已過期"
 redemption.failed: "兌換失敗，請稍後重試"
 redemption.not_provided: "未提供兌換碼"
 redemption.expire_time_invalid: "過期時間不能早於當前時間"
+redemption.quota_range: "兌換碼額度必須大於 0 且低於錢包上限"
 
 # User messages
 user.password_login_disabled: "管理員關閉了密碼登錄"
@@ -109,6 +111,8 @@ user.telegram_id_empty: "Telegram id 為空！"
 user.telegram_not_bound: "該 Telegram 帳號未綁定"
 user.linux_do_id_empty: "Linux DO id 為空！"
 user.quota_change_zero: "額度變更量不能為0"
+user.quota_adjustment_reason_required: "調整額度時必須填寫原因"
+user.quota_out_of_range: "調整後的額度超出錢包支援範圍"
 
 # Quota messages
 quota.negative: "額度不能為負數！"

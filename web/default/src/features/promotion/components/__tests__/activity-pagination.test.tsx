@@ -41,7 +41,7 @@ describe('promotion activity pagination', () => {
   test('loads the selected server page when the user moves forward', async () => {
     const requestedPages: number[] = []
     apiClient.get = async (url, config) => {
-      expect(url).toBe('/api/growth/events')
+      expect(url).toBe('/api/growth/fund-records')
       const page = config?.params?.p || 1
       requestedPages.push(page)
       return {
@@ -53,11 +53,17 @@ describe('promotion activity pagination', () => {
             total: 11,
             items: [
               {
-                id: page,
-                event_type: 'custom_event',
-                direction: 'income',
-                title: page === 1 ? 'First page reward' : 'Second page reward',
-                created_at: 1_700_000_000,
+                kind: 'growth_reward_issued',
+                source: 'growth_reward',
+                occurred_at: 1_700_000_000,
+                legs: [
+                  {
+                    account: 'referral_credit',
+                    asset: 'quota',
+                    amount: 5_000,
+                    balance_after: page * 5_000,
+                  },
+                ],
               },
             ],
           },
@@ -74,11 +80,12 @@ describe('promotion activity pagination', () => {
       </QueryClientProvider>
     )
 
-    expect(await screen.findByText('First page reward')).toBeInTheDocument()
+    expect(await screen.findByText(/Source: Task reward/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    expect(await screen.findByText('Second page reward')).toBeInTheDocument()
-    expect(screen.getByText('11 records · Page 2 of 2')).toBeInTheDocument()
+    expect(
+      await screen.findByText('11 records · Page 2 of 2')
+    ).toBeInTheDocument()
     expect(requestedPages).toEqual([1, 2])
     queryClient.clear()
   })
@@ -87,7 +94,7 @@ describe('promotion activity pagination', () => {
     const requestedUrls: string[] = []
     apiClient.get = async (url) => {
       requestedUrls.push(url)
-      if (url === '/api/growth/events') {
+      if (url === '/api/growth/fund-records') {
         return {
           data: {
             success: true,
@@ -97,10 +104,15 @@ describe('promotion activity pagination', () => {
               total: 1,
               items: [
                 {
-                  id: 1,
-                  event_type: 'custom_event',
-                  direction: 'income',
-                  title: 'General event',
+                  kind: 'growth_reward_issued',
+                  source: 'growth_reward',
+                  legs: [
+                    {
+                      account: 'referral_credit',
+                      asset: 'quota',
+                      amount: 5_000,
+                    },
+                  ],
                 },
               ],
             },
@@ -117,8 +129,6 @@ describe('promotion activity pagination', () => {
             total: 1,
             items: [
               {
-                id: 7,
-                invitee_id: 42,
                 invitee_name: 'Alice',
                 reward_type: 'first_request',
                 reward_quota: 12_000,
@@ -140,7 +150,7 @@ describe('promotion activity pagination', () => {
       </QueryClientProvider>
     )
 
-    expect(await screen.findByText('General event')).toBeInTheDocument()
+    expect(await screen.findByText('Task reward added')).toBeInTheDocument()
     await user.click(screen.getByLabelText('Activity type'))
     await user.click(
       await screen.findByRole('option', { name: 'Referral credit' })
@@ -151,7 +161,7 @@ describe('promotion activity pagination', () => {
     ).toBeInTheDocument()
     expect(screen.getByText(/Alice/)).toBeInTheDocument()
     expect(requestedUrls).toEqual([
-      '/api/growth/events',
+      '/api/growth/fund-records',
       '/api/user/aff/rewards',
     ])
     queryClient.clear()

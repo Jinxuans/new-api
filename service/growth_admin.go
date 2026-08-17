@@ -237,22 +237,7 @@ func ListAdminPromotionWithdrawals(pageInfo *common.PageInfo, status string) ([]
 		return nil, 0, err
 	}
 
-	query := model.DB.Model(&model.PromotionWithdrawal{})
-	if status != "" && status != "all" {
-		query = query.Where("status = ?", status)
-	}
-	var total int64
-	if err := query.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var withdrawals []*model.PromotionWithdrawal
-	if err := query.Order("id DESC").
-		Limit(pageInfo.GetPageSize()).
-		Offset(pageInfo.GetStartIdx()).
-		Find(&withdrawals).Error; err != nil {
-		return nil, 0, err
-	}
-	return withdrawals, total, nil
+	return model.ListAdminPromotionWithdrawals(pageInfo, status)
 }
 
 func newAdminGrowthRewardItem(item *model.GrowthRewardItem) *AdminGrowthRewardItem {
@@ -354,6 +339,9 @@ func validateAdminGrowthRewardItem(item *model.GrowthRewardItem, capabilities Ad
 	if capabilities.ClaimPassword && utf8.RuneCountInString(item.ClaimPassword) > 128 {
 		return errors.New("claim password cannot exceed 128 characters")
 	}
+	if item.Code == model.GrowthRewardItemJoinCommunity && item.Enabled && strings.TrimSpace(item.ClaimPassword) == "" {
+		return errors.New("join community reward requires a claim password before it can be enabled")
+	}
 	switch item.ItemType {
 	case model.GrowthRewardItemTypeAuto,
 		model.GrowthRewardItemTypeManual,
@@ -379,6 +367,7 @@ func validatePromotionWithdrawalStatusFilter(status string) error {
 	case "", "all",
 		model.PromotionWithdrawalStatusPendingReview,
 		model.PromotionWithdrawalStatusApproved,
+		model.PromotionWithdrawalStatusProcessing,
 		model.PromotionWithdrawalStatusPaid,
 		model.PromotionWithdrawalStatusRejected,
 		model.PromotionWithdrawalStatusFailed:

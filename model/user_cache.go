@@ -11,19 +11,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const userCacheSchemaVersion = 2
+const userCacheSchemaVersion = 4
 
 type UserBase struct {
-	Id          int    `json:"id"`
-	Group       string `json:"group"`
-	Email       string `json:"email"`
-	Quota       int    `json:"quota"`
-	Status      int    `json:"status"`
-	Role        int    `json:"role"`
-	Username    string `json:"username"`
-	Setting     string `json:"setting"`
-	AuthVersion int64  `json:"-"`
-	CacheSchema int    `json:"-"`
+	Id              int    `json:"id"`
+	Group           string `json:"group"`
+	Email           string `json:"email"`
+	Quota           int    `json:"quota"`
+	RefundDebtQuota int64  `json:"refund_debt_quota"`
+	RefundHold      bool   `json:"refund_hold"`
+	Status          int    `json:"status"`
+	Role            int    `json:"role"`
+	Username        string `json:"username"`
+	Setting         string `json:"setting"`
+	AuthVersion     int64  `json:"-"`
+	CacheSchema     int    `json:"-"`
 }
 
 func (user *UserBase) WriteContext(c *gin.Context) {
@@ -33,6 +35,7 @@ func (user *UserBase) WriteContext(c *gin.Context) {
 	common.SetContextKey(c, constant.ContextKeyUserEmail, user.Email)
 	common.SetContextKey(c, constant.ContextKeyUserName, user.Username)
 	common.SetContextKey(c, constant.ContextKeyUserSetting, user.GetSetting())
+	c.Set("refund_hold", user.RefundHold)
 }
 
 func (user *UserBase) GetSetting() dto.UserSetting {
@@ -92,9 +95,16 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (*UserBase, error) {
+	fenced, err := userRefundHoldFenceActive(userId)
+	if err != nil {
+		return nil, err
+	}
 	// Try getting from Redis first
 	userCache, err := cacheGetUserBase(userId)
 	if err == nil {
+		if fenced {
+			userCache.RefundHold = true
+		}
 		return userCache, nil
 	}
 
@@ -105,7 +115,7 @@ func GetUserCache(userId int) (*UserBase, error) {
 	if err != nil {
 		return nil, err
 	}
-	if common.RedisEnabled {
+	if common.RedisEnabled && !fenced {
 		floor, floorErr := getUserAuthVersionFloor(userId)
 		if floorErr == nil && floor > user.AuthVersion {
 			return nil, ErrUserAuthCachePending
@@ -117,7 +127,11 @@ func GetUserCache(userId int) (*UserBase, error) {
 			common.SysLog("failed to synchronously populate user cache: " + err.Error())
 		}
 	}
-	return user.ToBaseUser(), nil
+	baseUser := user.ToBaseUser()
+	if fenced {
+		baseUser.RefundHold = true
+	}
+	return baseUser, nil
 }
 
 func cacheGetUserBase(userId int) (*UserBase, error) {
@@ -143,30 +157,13 @@ func cacheGetUserBase(userId int) (*UserBase, error) {
 	return &userCache, nil
 }
 
-// Add atomic quota operations using hash fields.
-// 通过守卫式 Lua 脚本执行：哈希不存在时直接跳过（下次读取会从数据库水合），
-// 不会像裸 HINCRBY 那样创建只含 Quota 字段的残缺哈希。
-func cacheIncrUserQuota(userId int, delta int64) error {
-	if !common.RedisEnabled {
-		return nil
-	}
-	_, err := cacheApplyUserQuotaDelta(userId, delta)
-	return err
-}
-
-func cacheDecrUserQuota(userId int, delta int64) error {
-	return cacheIncrUserQuota(userId, -delta)
-}
-
-// syncCreditUserQuotaCache 在授信事务（充值/兑换等）提交后同步把增量补进缓存
-// 余额。预扣以缓存值为准（存在期间），授信不能绕过它，否则新到账的额度在
-// 缓存过期前不可用；缓存未命中无需处理，下次读取会从已提交的数据库余额水合。
-func syncCreditUserQuotaCache(userId int, quota int, operation string) {
-	if quota <= 0 {
-		return
-	}
-	if err := cacheIncrUserQuota(userId, int64(quota)); err != nil {
-		common.SysLog(fmt.Sprintf("failed to sync %s credit to user quota cache: %s", operation, err.Error()))
+// invalidateUserQuotaCacheAfterDBWrite publishes a database-first quota
+// mutation by deleting the cached snapshot. Applying a delayed delta is unsafe:
+// a refund may have invalidated and rehydrated the hash after the database
+// commit, causing the old delta to be applied to an already-current balance.
+func invalidateUserQuotaCacheAfterDBWrite(userId int, operation string) {
+	if err := invalidateUserCache(userId); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user quota cache after %s: %s", operation, err.Error()))
 	}
 }
 

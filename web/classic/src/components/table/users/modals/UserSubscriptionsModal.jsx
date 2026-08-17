@@ -26,6 +26,7 @@ import {
   SideSheet,
   Space,
   Tag,
+  TextArea,
   Typography,
 } from '@douyinfe/semi-ui';
 import { IconPlusCircle } from '@douyinfe/semi-icons';
@@ -81,6 +82,12 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
 
   const [plans, setPlans] = useState([]);
   const [selectedPlanId, setSelectedPlanId] = useState(null);
+  const [grantReason, setGrantReason] = useState('');
+  const [grantIdempotencyKey, setGrantIdempotencyKey] = useState('');
+  const [invalidateTargetId, setInvalidateTargetId] = useState(null);
+  const [invalidateReason, setInvalidateReason] = useState('');
+  const [invalidateIdempotencyKey, setInvalidateIdempotencyKey] = useState('');
+  const [invalidating, setInvalidating] = useState(false);
 
   const [subs, setSubs] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
@@ -152,6 +159,11 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
   useEffect(() => {
     if (!visible) return;
     setSelectedPlanId(null);
+    setGrantReason('');
+    setGrantIdempotencyKey('');
+    setInvalidateTargetId(null);
+    setInvalidateReason('');
+    setInvalidateIdempotencyKey('');
     setCurrentPage(1);
     loadPlans();
     loadUserSubscriptions();
@@ -170,18 +182,35 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
       showError(t('请选择订阅套餐'));
       return;
     }
+    const reason = grantReason.trim();
+    if (!reason) {
+      showError(t('请输入赠送原因（仅管理员可见）'));
+      return;
+    }
+    const idempotencyKey =
+      grantIdempotencyKey ||
+      (typeof crypto !== 'undefined' && crypto.randomUUID
+        ? `subscription-grant-${crypto.randomUUID()}`
+        : `subscription-grant-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    if (!grantIdempotencyKey) {
+      setGrantIdempotencyKey(idempotencyKey);
+    }
     setCreating(true);
     try {
       const res = await API.post(
         `/api/subscription/admin/users/${user.id}/subscriptions`,
         {
           plan_id: selectedPlanId,
+          reason,
+          idempotency_key: idempotencyKey,
         },
       );
       if (res.data?.success) {
         const msg = res.data?.data?.message;
         showSuccess(msg ? msg : t('新增成功'));
         setSelectedPlanId(null);
+        setGrantReason('');
+        setGrantIdempotencyKey('');
         await loadUserSubscriptions();
         onSuccess?.();
       } else {
@@ -195,54 +224,44 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
   };
 
   const invalidateSubscription = (subId) => {
-    Modal.confirm({
-      title: t('确认作废'),
-      content: t('作废后该订阅将立即失效，历史记录不受影响。是否继续？'),
-      centered: true,
-      onOk: async () => {
-        try {
-          const res = await API.post(
-            `/api/subscription/admin/user_subscriptions/${subId}/invalidate`,
-          );
-          if (res.data?.success) {
-            const msg = res.data?.data?.message;
-            showSuccess(msg ? msg : t('已作废'));
-            await loadUserSubscriptions();
-            onSuccess?.();
-          } else {
-            showError(res.data?.message || t('操作失败'));
-          }
-        } catch (e) {
-          showError(t('请求失败'));
-        }
-      },
-    });
+    setInvalidateTargetId(subId);
+    setInvalidateReason('');
+    setInvalidateIdempotencyKey('');
   };
 
-  const deleteSubscription = (subId) => {
-    Modal.confirm({
-      title: t('确认删除'),
-      content: t('删除会彻底移除该订阅记录（含权益明细）。是否继续？'),
-      centered: true,
-      okType: 'danger',
-      onOk: async () => {
-        try {
-          const res = await API.delete(
-            `/api/subscription/admin/user_subscriptions/${subId}`,
-          );
-          if (res.data?.success) {
-            const msg = res.data?.data?.message;
-            showSuccess(msg ? msg : t('已删除'));
-            await loadUserSubscriptions();
-            onSuccess?.();
-          } else {
-            showError(res.data?.message || t('删除失败'));
-          }
-        } catch (e) {
-          showError(t('请求失败'));
-        }
-      },
-    });
+  const confirmInvalidateSubscription = async () => {
+    const reason = invalidateReason.trim();
+    if (!invalidateTargetId || !reason) return;
+    const idempotencyKey =
+      invalidateIdempotencyKey ||
+      (typeof crypto !== 'undefined' && crypto.randomUUID
+        ? `subscription-invalidate-${crypto.randomUUID()}`
+        : `subscription-invalidate-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    if (!invalidateIdempotencyKey) {
+      setInvalidateIdempotencyKey(idempotencyKey);
+    }
+    setInvalidating(true);
+    try {
+      const res = await API.post(
+        `/api/subscription/admin/user_subscriptions/${invalidateTargetId}/invalidate`,
+        { reason, idempotency_key: idempotencyKey },
+      );
+      if (res.data?.success) {
+        const msg = res.data?.data?.message;
+        showSuccess(msg ? msg : t('已作废'));
+        setInvalidateTargetId(null);
+        setInvalidateReason('');
+        setInvalidateIdempotencyKey('');
+        await loadUserSubscriptions();
+        onSuccess?.();
+      } else {
+        showError(res.data?.message || t('操作失败'));
+      }
+    } catch (e) {
+      showError(t('请求失败'));
+    } finally {
+      setInvalidating(false);
+    }
   };
 
   const columns = useMemo(() => {
@@ -322,25 +341,16 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
           const isExpired =
             (sub?.end_time || 0) > 0 && (sub?.end_time || 0) < now;
           const isActive = sub?.status === 'active' && !isExpired;
-          const isCancelled = sub?.status === 'cancelled';
           return (
             <Space>
               <Button
                 size='small'
                 type='warning'
                 theme='light'
-                disabled={!isActive || isCancelled}
+                disabled={!isActive}
                 onClick={() => invalidateSubscription(sub?.id)}
               >
                 {t('作废')}
-              </Button>
-              <Button
-                size='small'
-                type='danger'
-                theme='light'
-                onClick={() => deleteSubscription(sub?.id)}
-              >
-                {t('删除')}
               </Button>
             </Space>
           );
@@ -350,83 +360,132 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
   }, [t, planTitleMap]);
 
   return (
-    <SideSheet
-      visible={visible}
-      placement='right'
-      width={isMobile ? '100%' : 920}
-      bodyStyle={{ padding: 0 }}
-      onCancel={onCancel}
-      title={
-        <Space>
-          <Tag color='blue' shape='circle'>
-            {t('管理')}
-          </Tag>
-          <Typography.Title heading={4} className='m-0'>
-            {t('用户订阅管理')}
-          </Typography.Title>
-          <Text type='tertiary' className='ml-2'>
-            {user?.username || '-'} (ID: {user?.id || '-'})
-          </Text>
-        </Space>
-      }
-    >
-      <div className='p-4'>
-        {/* 顶部操作栏：新增订阅 */}
-        <div className='flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4'>
-          <div className='flex gap-2 flex-1'>
-            <Select
-              placeholder={t('选择订阅套餐')}
-              optionList={planOptions}
-              value={selectedPlanId}
-              onChange={setSelectedPlanId}
-              loading={plansLoading}
-              filter
-              style={{ minWidth: isMobile ? undefined : 300, flex: 1 }}
+    <>
+      <SideSheet
+        visible={visible}
+        placement='right'
+        width={isMobile ? '100%' : 920}
+        bodyStyle={{ padding: 0 }}
+        onCancel={onCancel}
+        title={
+          <Space>
+            <Tag color='blue' shape='circle'>
+              {t('管理')}
+            </Tag>
+            <Typography.Title heading={4} className='m-0'>
+              {t('用户订阅管理')}
+            </Typography.Title>
+            <Text type='tertiary' className='ml-2'>
+              {user?.username || '-'} (ID: {user?.id || '-'})
+            </Text>
+          </Space>
+        }
+      >
+        <div className='p-4'>
+          {/* 顶部操作栏：新增订阅 */}
+          <div className='mb-4 flex flex-col gap-3'>
+            <div className='flex flex-1 gap-2'>
+              <Select
+                placeholder={t('选择订阅套餐')}
+                optionList={planOptions}
+                value={selectedPlanId}
+                onChange={(value) => {
+                  setSelectedPlanId(value);
+                  setGrantIdempotencyKey('');
+                }}
+                loading={plansLoading}
+                filter
+                style={{ minWidth: isMobile ? undefined : 300, flex: 1 }}
+              />
+              <Button
+                type='primary'
+                theme='solid'
+                icon={<IconPlusCircle />}
+                loading={creating}
+                disabled={!selectedPlanId || !grantReason.trim()}
+                onClick={createSubscription}
+              >
+                {t('赠送订阅')}
+              </Button>
+            </div>
+            <TextArea
+              value={grantReason}
+              maxCount={1000}
+              autosize={{ minRows: 2, maxRows: 4 }}
+              placeholder={t('请输入赠送原因（仅管理员可见）')}
+              onChange={(value) => {
+                setGrantReason(value);
+                setGrantIdempotencyKey('');
+              }}
             />
-            <Button
-              type='primary'
-              theme='solid'
-              icon={<IconPlusCircle />}
-              loading={creating}
-              onClick={createSubscription}
-            >
-              {t('新增订阅')}
-            </Button>
           </div>
-        </div>
 
-        {/* 订阅列表 */}
-        <CardTable
-          columns={columns}
-          dataSource={pagedSubs}
-          rowKey={(row) => row?.subscription?.id}
-          loading={loading}
-          scroll={{ x: 'max-content' }}
-          hidePagination={false}
-          pagination={{
-            currentPage,
-            pageSize,
-            total: subs.length,
-            pageSizeOpts: [10, 20, 50],
-            showSizeChanger: false,
-            onPageChange: handlePageChange,
-          }}
-          empty={
-            <Empty
-              image={
-                <IllustrationNoResult style={{ width: 150, height: 150 }} />
-              }
-              darkModeImage={
-                <IllustrationNoResultDark style={{ width: 150, height: 150 }} />
-              }
-              description={t('暂无订阅记录')}
-              style={{ padding: 30 }}
-            />
-          }
-          size='middle'
-        />
-      </div>
-    </SideSheet>
+          {/* 订阅列表 */}
+          <CardTable
+            columns={columns}
+            dataSource={pagedSubs}
+            rowKey={(row) => row?.subscription?.id}
+            loading={loading}
+            scroll={{ x: 'max-content' }}
+            hidePagination={false}
+            pagination={{
+              currentPage,
+              pageSize,
+              total: subs.length,
+              pageSizeOpts: [10, 20, 50],
+              showSizeChanger: false,
+              onPageChange: handlePageChange,
+            }}
+            empty={
+              <Empty
+                image={
+                  <IllustrationNoResult style={{ width: 150, height: 150 }} />
+                }
+                darkModeImage={
+                  <IllustrationNoResultDark
+                    style={{ width: 150, height: 150 }}
+                  />
+                }
+                description={t('暂无订阅记录')}
+                style={{ padding: 30 }}
+              />
+            }
+            size='middle'
+          />
+        </div>
+      </SideSheet>
+      <Modal
+        centered
+        visible={Boolean(invalidateTargetId)}
+        title={t('确认作废')}
+        okText={t('作废')}
+        cancelText={t('取消')}
+        confirmLoading={invalidating}
+        okButtonProps={{ disabled: !invalidateReason.trim() }}
+        onOk={confirmInvalidateSubscription}
+        onCancel={() => {
+          setInvalidateTargetId(null);
+          setInvalidateReason('');
+          setInvalidateIdempotencyKey('');
+        }}
+      >
+        <div className='flex flex-col gap-3'>
+          <Text type='secondary'>
+            {t('作废后该订阅将立即失效，历史记录不受影响。是否继续？')}
+          </Text>
+          <TextArea
+            value={invalidateReason}
+            maxCount={1000}
+            autosize={{ minRows: 2, maxRows: 4 }}
+            placeholder={t('请输入作废原因（仅管理员可见）')}
+            onChange={(value) => {
+              setInvalidateReason(value);
+              setInvalidateIdempotencyKey('');
+            }}
+          />
+        </div>
+      </Modal>
+    </>
   );
 };
 

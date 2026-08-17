@@ -25,3 +25,6 @@ dist-ssr
 *.sln
 *.sw?
 .tanstack/*
+
+# Generated i18n detail reports; the summary report remains tracked.
+src/i18n/locales/_reports/*.untranslated.json

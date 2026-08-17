@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -49,17 +50,29 @@ func TestMain(m *testing.M) {
 		&QuotaData{},
 		&Ability{},
 		&TopUp{},
+		&Redemption{},
 		&InvitationRebate{},
 		&InvitationReward{},
 		&PromotionEvent{},
 		&PromotionCommissionLedger{},
 		&PromotionWithdrawal{},
 		&PromotionWithdrawalItem{},
+		&PromotionWithdrawalOperation{},
+		&PromotionWithdrawalPayoutReference{},
 		&PromotionRefundCase{},
+		&PromotionRefundCaseUser{},
+		&PromotionRefundObligation{},
+		&PromotionRefundAction{},
+		&PromotionRefundRecoveryReceipt{},
+		&PromotionFundTransaction{},
+		&PromotionFundTransactionLeg{},
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
+		&BillingAdjustmentJournal{},
+		&SubscriptionAdminOperation{},
+		&SubscriptionAdminOperationItem{},
 		&GrowthRewardItem{},
 		&GrowthReward{},
 		&GrowthRewardBudget{},
@@ -80,6 +93,17 @@ func TestMain(m *testing.M) {
 func truncateTables(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
+		localUserRefundHoldFenceLock.Lock()
+		localUserRefundHoldFenceLeases = make(map[int]map[string]time.Time)
+		localUserRefundHoldFenceLock.Unlock()
+		DB.Exec("DELETE FROM promotion_fund_legs")
+		DB.Exec("DELETE FROM promotion_fund_transactions")
+		DB.Exec("DELETE FROM promotion_refund_actions")
+		DB.Exec("DELETE FROM promotion_refund_recovery_receipts")
+		DB.Exec("DELETE FROM promotion_refund_obligations")
+		DB.Exec("DELETE FROM promotion_refund_case_users")
+		DB.Exec("DELETE FROM promotion_withdrawal_operations")
+		DB.Exec("DELETE FROM promotion_withdrawal_payout_references")
 		DB.Exec("DELETE FROM tasks")
 		DB.Exec("DELETE FROM auth_flows")
 		DB.Exec("DELETE FROM external_identity_claims")
@@ -89,12 +113,12 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM two_fas")
 		DB.Exec("DELETE FROM tokens")
 		DB.Exec("DELETE FROM user_oauth_bindings")
-		DB.Exec("DELETE FROM users")
 		DB.Exec("DELETE FROM logs")
 		DB.Exec("DELETE FROM channels")
 		DB.Exec("DELETE FROM quota_data")
 		DB.Exec("DELETE FROM abilities")
 		DB.Exec("DELETE FROM top_ups")
+		DB.Exec("DELETE FROM redemptions")
 		DB.Exec("DELETE FROM invitation_rebates")
 		DB.Exec("DELETE FROM invitation_rewards")
 		DB.Exec("DELETE FROM promotion_events")
@@ -102,10 +126,13 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM promotion_withdrawals")
 		DB.Exec("DELETE FROM promotion_withdrawal_items")
 		DB.Exec("DELETE FROM promotion_refund_cases")
-		DB.Exec("DELETE FROM subscription_orders")
-		DB.Exec("DELETE FROM subscription_plans")
-		DB.Exec("DELETE FROM user_subscriptions")
+		DB.Exec("DELETE FROM billing_adjustment_journals")
 		DB.Exec("DELETE FROM subscription_pre_consume_records")
+		DB.Exec("DELETE FROM subscription_admin_operation_items")
+		DB.Exec("DELETE FROM subscription_admin_operations")
+		DB.Exec("DELETE FROM subscription_orders")
+		DB.Exec("DELETE FROM user_subscriptions")
+		DB.Exec("DELETE FROM subscription_plans")
 		DB.Exec("DELETE FROM growth_reward_items")
 		DB.Exec("DELETE FROM growth_rewards")
 		DB.Exec("DELETE FROM growth_reward_budgets")
@@ -116,6 +143,7 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM system_instances")
 		DB.Exec("DELETE FROM system_task_locks")
 		DB.Exec("DELETE FROM system_tasks")
+		DB.Exec("DELETE FROM users")
 	})
 }
 
@@ -282,4 +310,265 @@ func TestUpdateWithStatus_ConcurrentWinner(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, winCount, "exactly one goroutine should win the CAS")
+}
+
+func createTaskUsageProjectionFixture(t *testing.T, operationKey string, userId int, channelId int, delta int64) {
+	t.Helper()
+	_, err := CreateBillingAdjustment(BillingAdjustmentInput{
+		OperationKey:    operationKey,
+		RequestId:       operationKey,
+		Kind:            BillingAdjustmentKindTaskProjection,
+		FundingSource:   taskBillingSourceWallet,
+		UserId:          userId,
+		ChannelId:       channelId,
+		UsageDelta:      delta,
+		UsageRequired:   true,
+		FundingRequired: false,
+		TokenRequired:   false,
+		LogRequired:     false,
+	})
+	require.NoError(t, err)
+}
+
+func createTaskBillingTestUser(t *testing.T, id int, usedQuota int) *User {
+	t.Helper()
+	identity := fmt.Sprintf("task_projection_user_%d", id)
+	user := &User{
+		Id:          id,
+		Username:    identity,
+		AffCode:     identity,
+		Status:      common.UserStatusEnabled,
+		AuthVersion: 1,
+		Quota:       10_000,
+		UsedQuota:   usedQuota,
+	}
+	require.NoError(t, DB.Create(user).Error)
+	return user
+}
+
+func createTaskBillingTestChannel(t *testing.T, id int, usedQuota int64) *Channel {
+	t.Helper()
+	channel := &Channel{Id: id, Name: fmt.Sprintf("task_projection_channel_%d", id), Key: "sk-test", UsedQuota: usedQuota}
+	require.NoError(t, DB.Create(channel).Error)
+	return channel
+}
+
+func TestApplyTaskQuotaTransitionReplayInvalidatesWalletCache(t *testing.T) {
+	truncateTables(t)
+	server := useUserCacheMiniRedis(t)
+	user := createTaskBillingTestUser(t, 4101, 100)
+	channel := createTaskBillingTestChannel(t, 4101, 100)
+	task := &Task{
+		TaskID:    "task_wallet_cache_replay",
+		UserId:    user.Id,
+		ChannelId: channel.Id,
+		Quota:     100,
+		Group:     "default",
+		Status:    TaskStatusInProgress,
+		PrivateData: TaskPrivateData{
+			BillingSource: taskBillingSourceWallet,
+		},
+		Properties: Properties{OriginModelName: "test-model"},
+		Data:       json.RawMessage(`{}`),
+	}
+	insertTask(t, task)
+
+	applied, err := ApplyTaskQuotaTransitionWithProjection(task.ID, 100, 150, TaskBillingProjectionInput{})
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NoError(t, server.Set(getUserCacheKey(user.Id), "stale-pre-commit-snapshot"))
+	require.True(t, server.Exists(getUserCacheKey(user.Id)))
+
+	applied, err = ApplyTaskQuotaTransitionWithProjection(task.ID, 100, 150, TaskBillingProjectionInput{})
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.False(t, server.Exists(getUserCacheKey(user.Id)), "an idempotent replay must clear a cache that may predate an unknown commit")
+}
+
+func TestTaskUsageProjectionCompletesAcrossDeletedTargets(t *testing.T) {
+	t.Run("soft-deleted user remains auditable", func(t *testing.T) {
+		truncateTables(t)
+		user := createTaskBillingTestUser(t, 4201, 100)
+		channel := createTaskBillingTestChannel(t, 4201, 100)
+		createTaskUsageProjectionFixture(t, "task-usage-soft-user", user.Id, channel.Id, 50)
+		require.NoError(t, DB.Delete(user).Error)
+
+		require.NoError(t, ApplyBillingUsageProjection("task-usage-soft-user"))
+
+		var deletedUser User
+		require.NoError(t, DB.Unscoped().First(&deletedUser, user.Id).Error)
+		assert.Equal(t, 150, deletedUser.UsedQuota)
+		var persistedChannel Channel
+		require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+		assert.Equal(t, int64(150), persistedChannel.UsedQuota)
+	})
+
+	t.Run("hard-deleted user does not roll back channel", func(t *testing.T) {
+		truncateTables(t)
+		user := createTaskBillingTestUser(t, 4202, 100)
+		channel := createTaskBillingTestChannel(t, 4202, 100)
+		createTaskUsageProjectionFixture(t, "task-usage-hard-user", user.Id, channel.Id, 50)
+		require.NoError(t, DB.Unscoped().Delete(user).Error)
+
+		require.NoError(t, ApplyBillingUsageProjection("task-usage-hard-user"))
+
+		var persistedChannel Channel
+		require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+		assert.Equal(t, int64(150), persistedChannel.UsedQuota)
+		row, err := GetBillingAdjustment("task-usage-hard-user")
+		require.NoError(t, err)
+		require.NotNil(t, row)
+		assert.True(t, row.UsageApplied)
+		assert.Equal(t, BillingAdjustmentStatusCompleted, row.Status)
+	})
+
+	t.Run("hard-deleted channel does not roll back user", func(t *testing.T) {
+		truncateTables(t)
+		user := createTaskBillingTestUser(t, 4203, 100)
+		channel := createTaskBillingTestChannel(t, 4203, 100)
+		createTaskUsageProjectionFixture(t, "task-usage-hard-channel", user.Id, channel.Id, 50)
+		require.NoError(t, DB.Delete(channel).Error)
+
+		require.NoError(t, ApplyBillingUsageProjection("task-usage-hard-channel"))
+
+		var persistedUser User
+		require.NoError(t, DB.First(&persistedUser, user.Id).Error)
+		assert.Equal(t, 150, persistedUser.UsedQuota)
+		row, err := GetBillingAdjustment("task-usage-hard-channel")
+		require.NoError(t, err)
+		require.NotNil(t, row)
+		assert.True(t, row.UsageApplied)
+		assert.Equal(t, BillingAdjustmentStatusCompleted, row.Status)
+	})
+}
+
+func TestTaskUsageProjectionSaturatesEveryUsedQuotaToInt32(t *testing.T) {
+	truncateTables(t)
+	user := createTaskBillingTestUser(t, 4301, common.MaxQuota-2)
+	channel := createTaskBillingTestChannel(t, 4301, int64(common.MaxQuota-2))
+	createTaskUsageProjectionFixture(t, "task-usage-positive-saturation", user.Id, channel.Id, 10)
+
+	require.NoError(t, ApplyBillingUsageProjection("task-usage-positive-saturation"))
+	var persistedUser User
+	require.NoError(t, DB.First(&persistedUser, user.Id).Error)
+	assert.Equal(t, common.MaxQuota, persistedUser.UsedQuota)
+	var persistedChannel Channel
+	require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+	assert.Equal(t, int64(common.MaxQuota), persistedChannel.UsedQuota)
+
+	minQuota := -common.MaxQuota - 1
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Update("used_quota", minQuota+2).Error)
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("used_quota", minQuota+2).Error)
+	createTaskUsageProjectionFixture(t, "task-usage-negative-saturation", user.Id, channel.Id, -10)
+	require.NoError(t, ApplyBillingUsageProjection("task-usage-negative-saturation"))
+	require.NoError(t, DB.First(&persistedUser, user.Id).Error)
+	assert.Equal(t, minQuota, persistedUser.UsedQuota)
+	require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+	assert.Equal(t, int64(minQuota), persistedChannel.UsedQuota)
+}
+
+func TestTaskBillingLogAndDashboardProjectionAreReplaySafe(t *testing.T) {
+	truncateTables(t)
+	oldDataExportEnabled := common.DataExportEnabled
+	common.DataExportEnabled = true
+	t.Cleanup(func() { common.DataExportEnabled = oldDataExportEnabled })
+	CacheQuotaDataLock.Lock()
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+
+	user := createTaskBillingTestUser(t, 4401, 0)
+	channel := createTaskBillingTestChannel(t, 4401, 0)
+	const operationKey = "task-log-projection-replay"
+	row, err := CreateBillingAdjustment(BillingAdjustmentInput{
+		OperationKey:       operationKey,
+		RequestId:          operationKey,
+		Kind:               BillingAdjustmentKindTaskProjection,
+		FundingSource:      taskBillingSourceWallet,
+		UserId:             user.Id,
+		ChannelId:          channel.Id,
+		ModelName:          "test-model",
+		UsingGroup:         "default",
+		TaskId:             4401,
+		LogRequired:        true,
+		ProjectionLogType:  LogTypeConsume,
+		ProjectionLogQuota: 50,
+		ProjectionNodeName: "origin-node",
+	})
+	require.NoError(t, err)
+
+	// Ordinary logs may legitimately share a request ID. They must neither be
+	// rejected nor mistaken for the dedicated task projection.
+	require.NoError(t, DB.Create(&Log{
+		UserId:    user.Id,
+		CreatedAt: common.GetTimestamp(),
+		Type:      LogTypeSystem,
+		Content:   "ordinary log sharing a request id",
+		RequestId: operationKey,
+	}).Error)
+	claimed, err := ClaimBillingAdjustmentLogProjection(operationKey, "worker-one", common.GetTimestamp()+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, EnsureTaskBillingProjectionLog(row))
+	require.NoError(t, ReleaseBillingAdjustmentLogProjection(operationKey, "worker-one"))
+
+	claimed, err = ClaimBillingAdjustmentLogProjection(operationKey, "worker-two", common.GetTimestamp()+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, EnsureTaskBillingProjectionLog(row))
+	require.NoError(t, CompleteBillingAdjustmentLogProjection(operationKey, "worker-two"))
+	require.NoError(t, CompleteBillingAdjustmentLogProjection(operationKey, "worker-two"))
+
+	var taskLogCount int64
+	require.NoError(t, LOG_DB.Model(&Log{}).
+		Where("request_id = ? AND type = ?", operationKey, LogTypeConsume).
+		Count(&taskLogCount).Error)
+	assert.Equal(t, int64(1), taskLogCount)
+	var sharedRequestCount int64
+	require.NoError(t, LOG_DB.Model(&Log{}).Where("request_id = ?", operationKey).Count(&sharedRequestCount).Error)
+	assert.Equal(t, int64(2), sharedRequestCount)
+
+	var quotaData QuotaData
+	require.NoError(t, DB.Where(map[string]any{
+		"user_id":    user.Id,
+		"model_name": "test-model",
+		"use_group":  "default",
+		"channel_id": channel.Id,
+		"node_name":  "origin-node",
+	}).First(&quotaData).Error)
+	assert.Equal(t, 1, quotaData.Count)
+	assert.Equal(t, 50, quotaData.Quota)
+	finalRow, err := GetBillingAdjustment(operationKey)
+	require.NoError(t, err)
+	require.NotNil(t, finalRow)
+	assert.True(t, finalRow.LogApplied)
+	assert.Equal(t, BillingAdjustmentStatusCompleted, finalRow.Status)
+}
+
+func TestTaskInitialUsagePersistsBeforeBatchAdjustmentJournal(t *testing.T) {
+	truncateTables(t)
+	resetBatchUpdateTestState(t)
+	common.BatchUpdateEnabled = true
+	user := createTaskBillingTestUser(t, 4501, 0)
+	channel := createTaskBillingTestChannel(t, 4501, 0)
+
+	require.NoError(t, RecordTaskInitialUsage(user.Id, channel.Id, 100))
+	var persistedUser User
+	require.NoError(t, DB.First(&persistedUser, user.Id).Error)
+	assert.Equal(t, 100, persistedUser.UsedQuota)
+	assert.Equal(t, 1, persistedUser.RequestCount)
+	var persistedChannel Channel
+	require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+	assert.Equal(t, int64(100), persistedChannel.UsedQuota)
+
+	for i := 0; i < BatchUpdateTypeCount; i++ {
+		batchUpdateLocks[i].Lock()
+		assert.Empty(t, batchUpdateStores[i], "initial task usage must not depend on an in-process batch queue")
+		batchUpdateLocks[i].Unlock()
+	}
+	createTaskUsageProjectionFixture(t, "task-usage-after-durable-baseline", user.Id, channel.Id, 50)
+	require.NoError(t, ApplyBillingUsageProjection("task-usage-after-durable-baseline"))
+	require.NoError(t, DB.First(&persistedUser, user.Id).Error)
+	assert.Equal(t, 150, persistedUser.UsedQuota)
+	require.NoError(t, DB.First(&persistedChannel, channel.Id).Error)
+	assert.Equal(t, int64(150), persistedChannel.UsedQuota)
 }

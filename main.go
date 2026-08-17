@@ -149,11 +149,10 @@ func main() {
 		return a
 	}
 
-	// Register the periodic channel test, upstream model update, and async task
-	// polling (Midjourney / Suno / video) jobs as scheduled system tasks
+	// Register periodic maintenance and polling jobs as scheduled system tasks
 	// (DB-lease dedup across masters + run history), then start the runner that
-	// schedules and executes them. Master-only execution and the UpdateTask
-	// switch are enforced inside the runner and each handler's Enabled().
+	// schedules and executes them. The runner is master-only; UPDATE_TASK gates
+	// only async provider polling handlers, not financial maintenance.
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
 
@@ -313,6 +312,14 @@ func InitResources() error {
 
 	service.InitTokenEncoders()
 
+	// Refund-accounting migrations publish distributed hold fences. Redis must
+	// be ready before model.InitDB runs those migrations; otherwise a configured
+	// Redis deployment could expose a startup window or dereference a nil client.
+	err = common.InitRedisClient()
+	if err != nil {
+		return err
+	}
+
 	// Initialize SQL Database
 	err = model.InitDB()
 	if err != nil {
@@ -339,12 +346,6 @@ func InitResources() error {
 
 	// Initialize SQL Database
 	err = model.InitLogDB()
-	if err != nil {
-		return err
-	}
-
-	// Initialize Redis
-	err = common.InitRedisClient()
 	if err != nil {
 		return err
 	}

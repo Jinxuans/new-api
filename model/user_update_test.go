@@ -89,6 +89,37 @@ func TestUserUpdateDoesNotOverwriteConcurrentAccountingOrTokenChanges(t *testing
 	assert.Equal(t, "rotated-token", got.GetAccessToken())
 }
 
+func TestUserUpdateDoesNotRestoreClearedRefundRecoveryState(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	user := User{
+		Username:        "refund-recovery-update-user",
+		Password:        "password",
+		DisplayName:     "before",
+		Status:          common.UserStatusEnabled,
+		RefundDebtQuota: 500,
+		RefundHold:      true,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	staleUser, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
+		"refund_debt_quota": int64(0),
+		"refund_hold":       false,
+	}).Error)
+
+	staleUser.DisplayName = "after"
+	require.NoError(t, staleUser.Update(false))
+
+	got, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "after", got.DisplayName)
+	assert.Zero(t, got.RefundDebtQuota)
+	assert.False(t, got.RefundHold)
+}
+
 func TestUsageAccountingSupportsSignedDirectAndBatchDeltas(t *testing.T) {
 	setupUserUpdateTestState(t)
 	resetBatchUpdateTestState(t)

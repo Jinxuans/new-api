@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -26,7 +26,7 @@ import { formatQuota } from '@/lib/format'
 import { EarningsSection } from '../earnings-section'
 
 type ApiGet = (url: string) => Promise<{ data: unknown }>
-type ApiPost = (url: string) => Promise<{ data: unknown }>
+type ApiPost = (url: string, data?: unknown) => Promise<{ data: unknown }>
 const apiClient = api as unknown as { get: ApiGet; post: ApiPost }
 const originalGet = apiClient.get
 const originalPost = apiClient.post
@@ -131,6 +131,37 @@ describe('promotion earnings actions', () => {
     queryClient.clear()
   })
 
+  test('converts only the cash balance shown in the confirmation', async () => {
+    installOverviewFixture()
+    const overviewPost = apiClient.post
+    const actionRequests: unknown[] = []
+    apiClient.post = async (url, data) => {
+      if (url === '/api/growth/commissions/transfer') {
+        actionRequests.push(data)
+        return { data: { success: true, data: { quota: 500_000 } } }
+      }
+      return overviewPost(url, data)
+    }
+    const queryClient = renderEarnings()
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Convert all to balance' })
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Convert all cash' })
+    )
+
+    await waitFor(() => {
+      expect(actionRequests).toEqual([
+        {
+          expected_amount_cents: 1_234,
+          expected_quota_equivalent: 500_000,
+        },
+      ])
+    })
+    queryClient.clear()
+  })
+
   test('labels withdrawal fields and blocks empty payout details', async () => {
     installOverviewFixture()
     const queryClient = renderEarnings()
@@ -160,6 +191,46 @@ describe('promotion earnings actions', () => {
       'aria-invalid',
       'true'
     )
+    queryClient.clear()
+  })
+
+  test('withdraws only the cash balance shown in the confirmation', async () => {
+    installOverviewFixture()
+    const overviewPost = apiClient.post
+    const actionRequests: unknown[] = []
+    apiClient.post = async (url, data) => {
+      if (url === '/api/growth/withdrawals') {
+        actionRequests.push(data)
+        return { data: { success: true, data: { id: 1 } } }
+      }
+      return overviewPost(url, data)
+    }
+    const queryClient = renderEarnings()
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Withdraw all cash' })
+    )
+    fireEvent.change(screen.getByLabelText('Payout method'), {
+      target: { value: 'bank' },
+    })
+    fireEvent.change(screen.getByLabelText('Payout account'), {
+      target: { value: 'account-1' },
+    })
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Confirm withdrawal of all cash' })
+    )
+
+    await waitFor(() => {
+      expect(actionRequests).toEqual([
+        {
+          payout_method: 'bank',
+          payout_account: 'account-1',
+          remark: '',
+          expected_amount_cents: 1_234,
+          expected_quota_equivalent: 500_000,
+        },
+      ])
+    })
     queryClient.clear()
   })
 })

@@ -28,7 +28,7 @@ import { PromotionGuideSection } from './components/promotion-guide-section'
 const SECTION_LINKS = [
   ['#earn-rewards', 'Earn rewards'],
   ['#my-earnings', 'My earnings'],
-  ['#earnings-history', 'Earnings history'],
+  ['#earnings-history', 'Fund history'],
   ['#promotion-guide', 'Promotion guide'],
 ] as const
 

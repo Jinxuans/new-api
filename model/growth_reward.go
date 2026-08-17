@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -85,9 +86,7 @@ func CreateSettledGrowthReward(userId int, itemCode string, rewardQuota int, sou
 		return nil, err
 	}
 	if rewardQuota > 0 {
-		go func() {
-			_ = cacheIncrUserQuota(userId, int64(rewardQuota))
-		}()
+		invalidateUserQuotaCacheAfterDBWrite(userId, "growth reward")
 	}
 	return reward, nil
 }
@@ -113,6 +112,9 @@ func CreateSettledGrowthRewardTx(tx *gorm.DB, reward *GrowthReward) error {
 	}
 	if reward == nil {
 		return errors.New("reward is required")
+	}
+	if reward.RewardQuota < 0 {
+		return errors.New("reward quota cannot be negative")
 	}
 	result := tx.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "claim_key"}},
@@ -143,7 +145,29 @@ func CreateSettledGrowthRewardTx(tx *gorm.DB, reward *GrowthReward) error {
 	if result.RowsAffected != 1 {
 		return ErrTopUpQuotaLimitExceeded
 	}
-	return nil
+	var user User
+	if err := tx.Select("quota").Where("id = ?", reward.UserId).First(&user).Error; err != nil {
+		return err
+	}
+	balanceAfter := int64(user.Quota)
+	return CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+		TransactionKey: fmt.Sprintf("growth_reward:%d:issued", reward.Id),
+		Kind:           PromotionFundKindGrowthRewardIssued,
+		UserId:         reward.UserId,
+		SourceType:     "growth_rewards",
+		SourceId:       reward.Id,
+		SourceKey:      fmt.Sprintf("growth_rewards:%d", reward.Id),
+		ActorType:      "system",
+		Remark:         reward.Remark,
+		OccurredAt:     reward.SettledAt,
+	}, []PromotionFundTransactionLeg{{
+		Account:      PromotionFundAccountAPIBalance,
+		Asset:        PromotionFundAssetQuota,
+		Amount:       int64(reward.RewardQuota),
+		SourceType:   "growth_rewards",
+		SourceId:     reward.Id,
+		BalanceAfter: &balanceAfter,
+	}})
 }
 
 func LockUserForGrowthRewardTx(tx *gorm.DB, userId int) error {

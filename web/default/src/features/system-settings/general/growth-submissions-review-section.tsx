@@ -64,6 +64,7 @@ import { formatQuota } from '@/lib/format'
 import { SettingsSection } from '../components/settings-section'
 
 type AdminGrowthSubmission = GrowthSubmission & {
+  id: number
   user_id: number
   remark?: string
   reviewer_id?: number

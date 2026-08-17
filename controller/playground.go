@@ -3,7 +3,10 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -29,12 +32,6 @@ func Playground(c *gin.Context) {
 		return
 	}
 
-	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatOpenAI, nil, nil)
-	if err != nil {
-		newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-		return
-	}
-
 	userId := c.GetInt("id")
 
 	// Write user context to ensure acceptUnsetRatio is available
@@ -43,7 +40,22 @@ func Playground(c *gin.Context) {
 		newAPIError = types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 		return
 	}
+	if userCache.RefundHold {
+		newAPIError = types.NewErrorWithStatusCode(
+			errors.New(common.TranslateMessage(c, i18n.MsgAuthRefundHold)),
+			types.ErrorCodeAccessDenied,
+			http.StatusForbidden,
+			types.ErrOptionWithSkipRetry(),
+		)
+		return
+	}
 	userCache.WriteContext(c)
+
+	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatOpenAI, nil, nil)
+	if err != nil {
+		newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		return
+	}
 
 	tempToken := &model.Token{
 		UserId: userId,

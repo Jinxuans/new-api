@@ -52,7 +52,7 @@ export function ActivitySection() {
   const { t } = useTranslation()
   const activity = usePromotionActivity()
   const filters: Array<{ value: PromotionActivityFilter; label: string }> = [
-    { value: 'all', label: t('All activity') },
+    { value: 'funds', label: t('Fund flow') },
     { value: 'tasks', label: t('Task rewards') },
     { value: 'submissions', label: t('Content submissions') },
     { value: 'referrals', label: t('Referral credit') },
@@ -70,11 +70,23 @@ export function ActivitySection() {
       <Empty className='border'>
         <EmptyHeader>
           <EmptyMedia variant='icon'>
-            <HugeiconsIcon icon={Clock01Icon} strokeWidth={2} />
+            <HugeiconsIcon
+              icon={Clock01Icon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
           </EmptyMedia>
-          <EmptyTitle>{t('No activity yet')}</EmptyTitle>
+          <EmptyTitle>
+            {activity.filter === 'funds'
+              ? t('No fund records yet')
+              : t('No activity yet')}
+          </EmptyTitle>
           <EmptyDescription>
-            {t('New reward and referral activity will appear here.')}
+            {activity.filter === 'funds'
+              ? t(
+                  'This journal covers account credits, rewards, promotion funds, and recovery adjustments. API usage charges remain in usage logs, so this is not a complete wallet ledger.'
+                )
+              : t('New reward and referral activity will appear here.')}
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -129,7 +141,7 @@ export function ActivitySection() {
     <section
       id='earnings-history'
       aria-labelledby='earnings-history-title'
-      className='scroll-mt-20 space-y-4'
+      className='flex scroll-mt-20 flex-col gap-4'
     >
       <div className='flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between'>
         <div>
@@ -137,12 +149,16 @@ export function ActivitySection() {
             id='earnings-history-title'
             className='flex items-center gap-2 text-xl font-semibold'
           >
-            <HugeiconsIcon icon={Activity01Icon} strokeWidth={2} />
-            {t('Earnings history')}
+            <HugeiconsIcon
+              icon={Activity01Icon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
+            {t('Fund history')}
           </h2>
           <p className='text-muted-foreground mt-1 text-sm'>
             {t(
-              'Review task rewards, submissions, referral credit, cash commission, and withdrawals.'
+              'This journal covers account credits, rewards, promotion funds, and recovery adjustments. API usage charges remain in usage logs, so this is not a complete wallet ledger.'
             )}
           </p>
         </div>
@@ -175,7 +191,7 @@ export function ActivitySection() {
         </Field>
       </div>
       <Card data-card-hover='false'>
-        <CardContent className='space-y-4'>{content}</CardContent>
+        <CardContent className='flex flex-col gap-4'>{content}</CardContent>
       </Card>
     </section>
   )

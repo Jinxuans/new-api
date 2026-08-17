@@ -111,7 +111,7 @@ func PostSetup(c *gin.Context) {
 			AccessToken: nil,
 			Quota:       100000000,
 		}
-		err = model.DB.Create(&rootUser).Error
+		err = model.CreateInitialRootUser(&rootUser)
 		if err != nil {
 			c.JSON(200, gin.H{
 				"success": false,

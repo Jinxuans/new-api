@@ -33,7 +33,12 @@ import { Skeleton } from '@/components/ui/skeleton'
 export function PromotionSectionSkeleton() {
   const { t } = useTranslation()
   return (
-    <div aria-label={t('Loading')} className='grid gap-3 sm:grid-cols-3'>
+    <div
+      role='status'
+      aria-busy='true'
+      aria-label={t('Loading')}
+      className='grid gap-3 sm:grid-cols-3'
+    >
       <Skeleton className='h-28 w-full' />
       <Skeleton className='h-28 w-full' />
       <Skeleton className='h-28 w-full' />

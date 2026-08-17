@@ -135,34 +135,37 @@ func StartSystemTaskRunner() {
 
 			var lastScheduler time.Time
 			var lastStaleLockCleanup time.Time
-			runPass := func() {
-				// The scheduler/stale-lock pass is throttled independently of the
-				// claim pass: wakeups (e.g. a manual log cleanup) should claim
-				// immediately without re-running the scheduler every time.
-				now := time.Now()
-				if now.Sub(lastStaleLockCleanup) >= systemTaskStaleLockInterval {
-					lastStaleLockCleanup = now
-					if err := model.ExpireStaleSystemTaskLocks(common.GetTimestamp()); err != nil {
-						logger.LogWarn(context.Background(), fmt.Sprintf("system task stale lock cleanup failed: %v", err))
-					}
-				}
-				if now.Sub(lastScheduler) >= systemTaskSchedulerInterval {
-					lastScheduler = now
-					runSystemTaskScheduler()
-				}
-				runSystemTaskClaimPass(runnerID)
-			}
-
-			runPass()
+			runSystemTaskRunnerPass(runnerID, &lastScheduler, &lastStaleLockCleanup)
 			for {
 				select {
 				case <-ticker.C:
 				case <-systemTaskWakeup:
 				}
-				runPass()
+				runSystemTaskRunnerPass(runnerID, &lastScheduler, &lastStaleLockCleanup)
 			}
 		})
 	})
+}
+
+// runSystemTaskRunnerPass keeps scheduler throttling and task claiming in one
+// directly testable pass. StartSystemTaskRunner invokes it once before waiting
+// on the ticker, so newly registered maintenance jobs are scheduled at boot.
+func runSystemTaskRunnerPass(runnerID string, lastScheduler *time.Time, lastStaleLockCleanup *time.Time) {
+	// The scheduler/stale-lock pass is throttled independently of the claim
+	// pass: wakeups (e.g. a manual log cleanup) should claim immediately without
+	// re-running the scheduler every time.
+	now := time.Now()
+	if now.Sub(*lastStaleLockCleanup) >= systemTaskStaleLockInterval {
+		*lastStaleLockCleanup = now
+		if err := model.ExpireStaleSystemTaskLocks(common.GetTimestamp()); err != nil {
+			logger.LogWarn(context.Background(), fmt.Sprintf("system task stale lock cleanup failed: %v", err))
+		}
+	}
+	if now.Sub(*lastScheduler) >= systemTaskSchedulerInterval {
+		*lastScheduler = now
+		runSystemTaskScheduler()
+	}
+	runSystemTaskClaimPass(runnerID)
 }
 
 func StartLogCleanupTask(targetTimestamp int64) (*model.SystemTask, error) {

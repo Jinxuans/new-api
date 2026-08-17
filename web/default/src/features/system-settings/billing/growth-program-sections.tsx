@@ -25,11 +25,9 @@ import type {
   ReferralProgramFormValues,
   RewardProgramFormValues,
 } from '../general/growth-admin-config'
-import { GrowthRefundCasesSection } from '../general/growth-refund-cases-section'
 import { GrowthRewardItemsSection } from '../general/growth-reward-items-section'
 import { RewardProgramSettingsSection } from '../general/growth-settings-section'
 import { GrowthSubmissionsReviewSection } from '../general/growth-submissions-review-section'
-import { GrowthWithdrawalsReviewSection } from '../general/growth-withdrawals-review-section'
 import { ReferralProgramSettingsSection } from '../general/referral-program-settings-section'
 
 export function RewardProgramAdminSection(props: {
@@ -88,49 +86,17 @@ export function ReferralProgramAdminSection(props: {
   const { t } = useTranslation()
 
   return (
-    <Tabs defaultValue='rules' className='min-w-0 gap-5'>
-      <TabsList
-        aria-label={t('Referral Program')}
-        className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'
-      >
-        <TabsTrigger value='rules'>{t('Referral rules')}</TabsTrigger>
-        <TabsTrigger value='withdrawals'>{t('Withdrawal Reviews')}</TabsTrigger>
-        <TabsTrigger value='refunds'>{t('Refund cases')}</TabsTrigger>
-      </TabsList>
-      <TabsContent value='rules' keepMounted>
-        <ProgramPanel
-          title={t('Referral rules')}
-          description={t(
-            'Configure rewards and commission for invitation relationships.'
-          )}
-        >
-          <ReferralProgramSettingsSection
-            defaultValues={props.defaultValues}
-            complianceConfirmed={props.complianceConfirmed}
-          />
-        </ProgramPanel>
-      </TabsContent>
-      <TabsContent value='withdrawals' keepMounted>
-        <ProgramPanel
-          title={t('Withdrawal Reviews')}
-          description={t(
-            'Review cash commission withdrawals and record offline payment.'
-          )}
-        >
-          <GrowthWithdrawalsReviewSection />
-        </ProgramPanel>
-      </TabsContent>
-      <TabsContent value='refunds' keepMounted>
-        <ProgramPanel
-          title={t('Refund cases')}
-          description={t(
-            'Review refunds that need manual commission recovery or quota adjustment.'
-          )}
-        >
-          <GrowthRefundCasesSection />
-        </ProgramPanel>
-      </TabsContent>
-    </Tabs>
+    <ProgramPanel
+      title={t('Referral rules')}
+      description={t(
+        'Configure rewards and commission for invitation relationships.'
+      )}
+    >
+      <ReferralProgramSettingsSection
+        defaultValues={props.defaultValues}
+        complianceConfirmed={props.complianceConfirmed}
+      />
+    </ProgramPanel>
   )
 }
 

@@ -19,21 +19,19 @@ For commercial licensing, please contact support@quantumnous.com
 import { render, screen } from '@testing-library/react'
 import { describe, expect, test } from 'vitest'
 
-import { formatQuota } from '@/lib/format'
-
-import type { PromotionEvent } from '../../shared'
+import type { PromotionFundTransaction } from '../../shared'
 import { PromotionActivityRows } from '../activity-rows'
 
-function renderEvent(event: Partial<PromotionEvent>) {
+function renderTransaction(transaction: Partial<PromotionFundTransaction>) {
   render(
     <PromotionActivityRows
-      filter='all'
+      filter='funds'
       items={[
         {
-          id: 1,
-          event_type: 'commission_settled',
-          direction: 'income',
-          ...event,
+          kind: 'commission_settled',
+          source: 'commission',
+          legs: [],
+          ...transaction,
         },
       ]}
     />
@@ -41,27 +39,76 @@ function renderEvent(event: Partial<PromotionEvent>) {
 }
 
 describe('promotion activity amount semantics', () => {
-  test('shows settled commission as cash without a second API balance gain', () => {
-    renderEvent({
-      quota_delta: 5_000,
-      cash_amount_cents: 1_000,
-      currency: 'CNY',
+  test('shows both account legs when pending commission becomes available', () => {
+    renderTransaction({
+      legs: [
+        {
+          account: 'commission_pending',
+          asset: 'cash',
+          currency: 'CNY',
+          amount: -1_000,
+          balance_after: 0,
+        },
+        {
+          account: 'commission_available',
+          asset: 'cash',
+          currency: 'CNY',
+          amount: 1_000,
+          balance_after: 1_000,
+        },
+      ],
     })
 
+    expect(
+      screen.getByText('Debited from Pending cash commission')
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Credited to Available cash commission')
+    ).toBeInTheDocument()
+    expect(screen.getByText('-CNY 10.00')).toBeInTheDocument()
     expect(screen.getByText('+CNY 10.00')).toBeInTheDocument()
-    expect(screen.queryByText(`+${formatQuota(5_000)}`)).not.toBeInTheDocument()
   })
 
-  test('shows converted commission as API balance and keeps cash as context', () => {
-    renderEvent({
-      event_type: 'commission_transferred',
-      quota_delta: 5_000,
-      cash_amount_cents: 1_000,
-      currency: 'CNY',
+  test('shows cash source and API balance destination for commission conversion', () => {
+    renderTransaction({
+      kind: 'commission_transferred_to_balance',
+      legs: [
+        {
+          account: 'commission_available',
+          asset: 'cash',
+          currency: 'CNY',
+          amount: -1_000,
+        },
+        {
+          account: 'api_balance',
+          asset: 'quota',
+          amount: 5_000,
+          balance_after: 20_000,
+        },
+      ],
     })
 
-    expect(screen.getByText(`+${formatQuota(5_000)}`)).toBeInTheDocument()
-    expect(screen.getByText(/Cash commission: CNY 10\.00/)).toBeInTheDocument()
-    expect(screen.queryByText(/\//)).not.toBeInTheDocument()
+    expect(
+      screen.getByText('Debited from Available cash commission')
+    ).toBeInTheDocument()
+    expect(screen.getByText('Credited to API balance')).toBeInTheDocument()
+    expect(screen.getByText('-CNY 10.00')).toBeInTheDocument()
+  })
+
+  test('uses the currency minor-unit scale for cash recovery legs', () => {
+    renderTransaction({
+      kind: 'refund_debt_assessment',
+      source: 'refund',
+      legs: [
+        {
+          account: 'refund_debt',
+          asset: 'cash',
+          currency: 'JPY',
+          amount: 500,
+        },
+      ],
+    })
+
+    expect(screen.getByText('+JPY 500')).toBeInTheDocument()
   })
 })

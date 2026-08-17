@@ -38,8 +38,7 @@ func ApplyImageBilling(c *gin.Context, info *relaycommon.RelayInfo, request dto.
 		}
 	}
 
-	applyOtherRatiosToImagePreConsume(info)
-	return nil
+	return applyOtherRatiosToImagePreConsume(info)
 }
 
 func isImageRelayMode(relayMode int) bool {
@@ -292,16 +291,13 @@ func normalizeImageBillingUnknownPolicy(policy string) string {
 	return policy
 }
 
-func applyOtherRatiosToImagePreConsume(info *relaycommon.RelayInfo) {
-	otherRatios := info.PriceData.OtherRatios()
-	if info.PriceData.QuotaToPreConsume <= 0 || len(otherRatios) == 0 {
-		return
+func applyOtherRatiosToImagePreConsume(info *relaycommon.RelayInfo) error {
+	baseQuota := info.PriceData.ApplyOtherRatiosToFloat(info.PriceData.ModelPrice * common.QuotaPerUnit)
+	quota, err := common.QuotaFromFloatStrict(baseQuota * info.PriceData.GroupRatioInfo.GroupRatio)
+	if err != nil {
+		return err
 	}
-	quota := float64(info.PriceData.QuotaToPreConsume)
-	for _, ratio := range otherRatios {
-		if ratio > 0 && ratio != 1 {
-			quota *= ratio
-		}
-	}
-	info.PriceData.QuotaToPreConsume = int(quota)
+	info.PriceData.QuotaToPreConsumeBeforeGroup = baseQuota
+	info.PriceData.QuotaToPreConsume = quota
+	return nil
 }

@@ -13,15 +13,20 @@ func TestSettleDuePromotionCommissionsMakesMaturedCashAvailable(t *testing.T) {
 	truncate(t)
 	seedUser(t, 3005, 0)
 	rebate := &model.InvitationRebate{
-		InviterId:   3005,
-		InviteeId:   3006,
-		TopUpId:     9005,
-		TradeNo:     "settle-due-test",
-		Cashable:    true,
-		RebateQuota: 5000,
-		SettleAfter: time.Now().Unix() - 1,
-		Status:      model.InvitationRebateStatusPending,
-		CreatedAt:   time.Now().Unix() - 10,
+		InviterId:          3005,
+		InviteeId:          3006,
+		TopUpId:            9005,
+		TradeNo:            "settle-due-test",
+		PaidAmountMinor:    10_000,
+		PaidCurrency:       "CNY",
+		PaidAmountVerified: true,
+		RebateAmountMinor:  1_000,
+		RebateCurrency:     "CNY",
+		Cashable:           true,
+		RebateQuota:        5000,
+		SettleAfter:        time.Now().Unix() - 1,
+		Status:             model.InvitationRebateStatusPending,
+		CreatedAt:          time.Now().Unix() - 10,
 	}
 	require.NoError(t, model.DB.Create(rebate).Error)
 	ledger := &model.PromotionCommissionLedger{

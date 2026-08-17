@@ -21,4 +21,10 @@ type BillingSettler interface {
 
 	// Reserve 将预扣额度补到目标值；若目标值不高于当前预扣额度则不做任何事。
 	Reserve(targetQuota int) error
+
+	// ConfirmDispatch 在请求进入上游调用边界前提交本次预备额度。
+	ConfirmDispatch() error
+
+	// ReserveUsage 为已经产生的长连接用量扩充额度，恢复时必须继续补扣。
+	ReserveUsage(targetQuota int) error
 }

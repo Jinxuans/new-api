@@ -11,10 +11,13 @@ import (
 
 type cacheQuotaResult int
 
+var errUserQuotaInsufficientForPersistence = errors.New("user quota is insufficient for the reserved amount")
+
 const (
 	cacheQuotaInsufficient cacheQuotaResult = iota
 	cacheQuotaOK
 	cacheQuotaMiss
+	cacheQuotaHeld
 )
 
 const userQuotaReserveScript = `
@@ -22,6 +25,10 @@ if tonumber(redis.call('HGET', KEYS[1], 'Id') or '0') ~= tonumber(ARGV[2])
   or tonumber(redis.call('HGET', KEYS[1], 'CacheSchema') or '0') ~= tonumber(ARGV[3])
   or redis.call('HEXISTS', KEYS[1], 'Quota') == 0 then
   return -1
+end
+local refund_hold = string.lower(tostring(redis.call('HGET', KEYS[1], 'RefundHold') or ''))
+if redis.call('EXISTS', KEYS[2]) == 1 or refund_hold == 'true' or refund_hold == '1' then
+  return -2
 end
 local quota = tonumber(redis.call('HGET', KEYS[1], 'Quota'))
 if quota == nil or quota < tonumber(ARGV[1]) then
@@ -74,6 +81,8 @@ func quotaResultFromLua(result int, err error) (cacheQuotaResult, error) {
 		return cacheQuotaOK, nil
 	case 0:
 		return cacheQuotaInsufficient, nil
+	case -2:
+		return cacheQuotaHeld, nil
 	default:
 		return cacheQuotaMiss, nil
 	}
@@ -81,7 +90,7 @@ func quotaResultFromLua(result int, err error) (cacheQuotaResult, error) {
 
 func cacheTryReserveUserQuota(userID int, amount int64) (cacheQuotaResult, error) {
 	result, err := common.RDB.Eval(context.Background(), userQuotaReserveScript,
-		[]string{getUserCacheKey(userID)}, amount, userID, userCacheSchemaVersion).Int()
+		[]string{getUserCacheKey(userID), userRefundHoldKey(userID)}, amount, userID, userCacheSchemaVersion).Int()
 	return quotaResultFromLua(result, err)
 }
 
@@ -103,18 +112,34 @@ func cacheApplyTokenQuotaDelta(id int, key string, delta int64) (cacheQuotaResul
 	return quotaResultFromLua(result, err)
 }
 
-// persistUserQuotaDelta 把已在缓存侧预扣成功的增量落库；批量模式下入队，
-// 直写模式下要求行存在（用户已删除时报错，交由调用方补偿缓存）。
+// persistUserQuotaDelta 把已在缓存侧预扣成功的增量同步落库。
+// Wallet quota is a financial balance and must never enter the process-local
+// batch queue: a remote refund worker cannot drain another instance's queue.
+// The caller does not observe a successful reservation until this write has
+// completed, so every successful pre-fence debit is already in the refund's
+// database snapshot. The conditional update also rejects a durable hold.
 func persistUserQuotaDelta(id int, delta int) error {
-	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, delta)
-		return nil
+	query := DB.Model(&User{}).Where("id = ?", id)
+	if delta < 0 {
+		query = query.Where("quota >= ? AND (refund_hold = ? OR refund_hold IS NULL)", -delta, false)
 	}
-	result := DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", delta))
+	result := query.Update("quota", gorm.Expr("quota + ?", delta))
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		if delta < 0 {
+			var user User
+			if err := DB.Select("id", "quota", "refund_hold").Where("id = ?", id).First(&user).Error; err != nil {
+				return err
+			}
+			if user.RefundHold {
+				return ErrUserRefundHeld
+			}
+			if user.Quota < -delta {
+				return errUserQuotaInsufficientForPersistence
+			}
+		}
 		return gorm.ErrRecordNotFound
 	}
 	return nil
@@ -143,9 +168,19 @@ func persistTokenQuotaDelta(id int, delta int) error {
 
 func reserveUserQuotaDB(id int, quota int) (bool, error) {
 	result := DB.Model(&User{}).
-		Where("id = ? AND quota >= ?", id, quota).
+		Where("id = ? AND quota >= ? AND (refund_hold = ? OR refund_hold IS NULL)", id, quota, false).
 		Update("quota", gorm.Expr("quota - ?", quota))
-	return result.RowsAffected == 1, result.Error
+	if result.Error != nil || result.RowsAffected == 1 {
+		return result.RowsAffected == 1, result.Error
+	}
+	var user User
+	if err := DB.Select("id", "refund_hold").Where("id = ?", id).First(&user).Error; err != nil {
+		return false, err
+	}
+	if user.RefundHold {
+		return false, ErrUserRefundHeld
+	}
+	return false, nil
 }
 
 func reserveTokenQuotaDB(id int, quota int) (bool, error) {
@@ -188,10 +223,27 @@ func TryReserveUserQuota(id int, quota int) (bool, error) {
 	if result == cacheQuotaInsufficient {
 		return false, nil
 	}
+	if result == cacheQuotaHeld {
+		return false, ErrUserRefundHeld
+	}
 	if err = persistUserQuotaDelta(id, -quota); err != nil {
 		compensated, compensateErr := cacheApplyUserQuotaDelta(id, int64(quota))
 		if compensateErr != nil || compensated != cacheQuotaOK {
 			common.SysError(fmt.Sprintf("failed to compensate reserved user quota: result=%d error=%v", compensated, compensateErr))
+			if invalidateErr := invalidateUserCache(id); invalidateErr != nil {
+				common.SysError("failed to invalidate user quota cache after reservation compensation failure: " + invalidateErr.Error())
+			}
+		}
+		if errors.Is(err, errUserQuotaInsufficientForPersistence) || errors.Is(err, ErrUserRefundHeld) {
+			// A cache snapshot can be newer than an old delayed delta but still
+			// older than the database. A durable refund hold can likewise be newer
+			// than the hash. Discard either stale snapshot after compensation.
+			if invalidateErr := invalidateUserCache(id); invalidateErr != nil {
+				common.SysError("failed to invalidate stale user quota cache after database state conflict: " + invalidateErr.Error())
+			}
+		}
+		if errors.Is(err, errUserQuotaInsufficientForPersistence) {
+			return false, nil
 		}
 		return false, err
 	}

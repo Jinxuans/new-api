@@ -1,8 +1,11 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -20,12 +23,47 @@ const (
 
 	PromotionWithdrawalStatusPendingReview = "pending_review"
 	PromotionWithdrawalStatusApproved      = "approved"
+	PromotionWithdrawalStatusProcessing    = "processing"
 	PromotionWithdrawalStatusPaid          = "paid"
 	PromotionWithdrawalStatusRejected      = "rejected"
 	PromotionWithdrawalStatusFailed        = "failed"
+
+	PromotionWithdrawalActionSubmitted         = "submitted"
+	PromotionWithdrawalActionApproved          = "approved"
+	PromotionWithdrawalActionPayoutInitiated   = "payout_initiated"
+	PromotionWithdrawalActionPayoutFailed      = "payout_failed"
+	PromotionWithdrawalActionRejected          = "rejected"
+	PromotionWithdrawalActionPaid              = "paid"
+	PromotionWithdrawalActionCancelledByRefund = "cancelled_by_refund"
+
+	PromotionWithdrawalActorUser   = "user"
+	PromotionWithdrawalActorAdmin  = "admin"
+	PromotionWithdrawalActorSystem = "system"
+	PromotionWithdrawalActorLegacy = "legacy"
 )
 
-var ErrPromotionWithdrawalLedgerNotPayable = errors.New("withdrawal contains a commission that is no longer eligible for payout")
+func isKnownPromotionCommissionStatus(status string) bool {
+	switch status {
+	case PromotionCommissionStatusPending,
+		PromotionCommissionStatusSettled,
+		PromotionCommissionStatusWithdrawing,
+		PromotionCommissionStatusWithdrawn,
+		PromotionCommissionStatusTransferred,
+		PromotionCommissionStatusReversed:
+		return true
+	default:
+		return false
+	}
+}
+
+var (
+	ErrPromotionWithdrawalLedgerNotPayable        = errors.New("withdrawal contains a commission that is no longer eligible for payout")
+	ErrPromotionWithdrawalPayoutReferenceRequired = errors.New("payout trade number is required")
+	ErrPromotionWithdrawalFailureReasonRequired   = errors.New("payout failure reason is required")
+	ErrPromotionWithdrawalFailureConflict         = errors.New("withdrawal payout failure was already recorded with a different payload")
+	ErrPromotionWithdrawalPaidConflict            = errors.New("withdrawal payout confirmation was already recorded with a different payload")
+	ErrPromotionWithdrawalOperationImmutable      = errors.New("withdrawal operation history is immutable")
+)
 
 type PromotionCommissionLedger struct {
 	Id                  int    `json:"id"`
@@ -57,23 +95,25 @@ type PromotionCommissionLedger struct {
 }
 
 type PromotionWithdrawal struct {
-	Id                    int    `json:"id"`
-	UserId                int    `json:"user_id" gorm:"index"`
-	Currency              string `json:"currency" gorm:"type:varchar(16);index"`
-	GrossAmountCents      int64  `json:"gross_amount_cents"`
-	FeeAmountCents        int64  `json:"fee_amount_cents"`
-	TaxAmountCents        int64  `json:"tax_amount_cents"`
-	NetAmountCents        int64  `json:"net_amount_cents"`
-	Status                string `json:"status" gorm:"type:varchar(32);index"`
-	PayoutMethod          string `json:"payout_method" gorm:"type:varchar(32);index"`
-	PayoutAccountSnapshot string `json:"payout_account_snapshot" gorm:"type:text"`
-	TradeNo               string `json:"trade_no" gorm:"type:varchar(255);index"`
-	ReviewerId            int    `json:"reviewer_id" gorm:"index"`
-	ReviewNote            string `json:"review_note" gorm:"type:text"`
-	AppliedAt             int64  `json:"applied_at" gorm:"index"`
-	ReviewedAt            int64  `json:"reviewed_at" gorm:"index"`
-	PaidAt                int64  `json:"paid_at" gorm:"index"`
-	CreatedAt             int64  `json:"created_at" gorm:"index"`
+	Id                    int                             `json:"id"`
+	UserId                int                             `json:"user_id" gorm:"index"`
+	Currency              string                          `json:"currency" gorm:"type:varchar(16);index"`
+	GrossAmountCents      int64                           `json:"gross_amount_cents"`
+	FeeAmountCents        int64                           `json:"fee_amount_cents"`
+	TaxAmountCents        int64                           `json:"tax_amount_cents"`
+	NetAmountCents        int64                           `json:"net_amount_cents"`
+	Status                string                          `json:"status" gorm:"type:varchar(32);index"`
+	PayoutMethod          string                          `json:"payout_method" gorm:"type:varchar(32);index"`
+	PayoutAccountSnapshot string                          `json:"payout_account_snapshot" gorm:"type:text"`
+	TradeNo               string                          `json:"trade_no" gorm:"type:varchar(255);index"`
+	ReviewerId            int                             `json:"reviewer_id" gorm:"index"`
+	ReviewNote            string                          `json:"review_note" gorm:"type:text"`
+	AppliedAt             int64                           `json:"applied_at" gorm:"index"`
+	ReviewedAt            int64                           `json:"reviewed_at" gorm:"index"`
+	PayoutInitiatedAt     int64                           `json:"payout_initiated_at" gorm:"index"`
+	PaidAt                int64                           `json:"paid_at" gorm:"index"`
+	CreatedAt             int64                           `json:"created_at" gorm:"index"`
+	Operations            []*PromotionWithdrawalOperation `json:"operations" gorm:"foreignKey:WithdrawalId"`
 }
 
 type PromotionWithdrawalItem struct {
@@ -84,10 +124,26 @@ type PromotionWithdrawalItem struct {
 	CreatedAt    int64 `json:"created_at" gorm:"index"`
 }
 
+// PromotionWithdrawalOperation is an append-only audit entry for one
+// successful withdrawal state transition. The unique action constraint also
+// protects the current one-way lifecycle from duplicate audit entries.
+type PromotionWithdrawalOperation struct {
+	Id                int    `json:"id"`
+	WithdrawalId      int    `json:"withdrawal_id" gorm:"uniqueIndex:idx_promotion_withdrawal_operation,priority:1"`
+	Action            string `json:"action" gorm:"type:varchar(32);uniqueIndex:idx_promotion_withdrawal_operation,priority:2"`
+	ActorType         string `json:"actor_type" gorm:"type:varchar(16);index"`
+	ActorId           int    `json:"actor_id" gorm:"index"`
+	Note              string `json:"note" gorm:"type:text"`
+	ExternalReference string `json:"external_reference" gorm:"type:varchar(255);index"`
+	Reconstructed     bool   `json:"reconstructed"`
+	CreatedAt         int64  `json:"created_at" gorm:"index"`
+}
+
 func (ledger *PromotionCommissionLedger) BeforeCreate(_ *gorm.DB) error {
 	if ledger.CreatedAt == 0 {
 		ledger.CreatedAt = common.GetTimestamp()
 	}
+	ledger.Currency = strings.ToUpper(strings.TrimSpace(ledger.Currency))
 	if ledger.Currency == "" {
 		ledger.Currency = "CNY"
 	}
@@ -127,6 +183,334 @@ func (item *PromotionWithdrawalItem) BeforeCreate(_ *gorm.DB) error {
 	return nil
 }
 
+func (operation *PromotionWithdrawalOperation) BeforeCreate(_ *gorm.DB) error {
+	if operation.CreatedAt == 0 && !operation.Reconstructed {
+		operation.CreatedAt = common.GetTimestamp()
+	}
+	return nil
+}
+
+func (operation *PromotionWithdrawalOperation) BeforeUpdate(_ *gorm.DB) error {
+	return ErrPromotionWithdrawalOperationImmutable
+}
+
+func (operation *PromotionWithdrawalOperation) BeforeDelete(_ *gorm.DB) error {
+	return ErrPromotionWithdrawalOperationImmutable
+}
+
+func CreatePromotionWithdrawalOperationTx(tx *gorm.DB, operation *PromotionWithdrawalOperation) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if operation == nil || operation.WithdrawalId <= 0 {
+		return errors.New("invalid withdrawal operation")
+	}
+
+	expectedActorType := PromotionWithdrawalActorAdmin
+	switch operation.Action {
+	case PromotionWithdrawalActionSubmitted:
+		expectedActorType = PromotionWithdrawalActorUser
+	case PromotionWithdrawalActionApproved, PromotionWithdrawalActionPayoutInitiated, PromotionWithdrawalActionPayoutFailed, PromotionWithdrawalActionRejected, PromotionWithdrawalActionPaid:
+	case PromotionWithdrawalActionCancelledByRefund:
+		expectedActorType = PromotionWithdrawalActorSystem
+	default:
+		return errors.New("invalid withdrawal operation")
+	}
+	if operation.ActorType != expectedActorType {
+		return errors.New("invalid withdrawal operation actor")
+	}
+	if operation.ActorType == PromotionWithdrawalActorSystem {
+		if operation.ActorId != 0 {
+			return errors.New("invalid withdrawal operation actor")
+		}
+	} else if operation.ActorId <= 0 {
+		return errors.New("invalid withdrawal operation actor")
+	}
+	if operation.ActorId > 0 {
+		var withdrawal PromotionWithdrawal
+		if err := tx.Select("user_id").Where("id = ?", operation.WithdrawalId).First(&withdrawal).Error; err != nil {
+			return err
+		}
+		lockedUsers, err := lockUsersForFinancialWriteTx(tx, operation.ActorId, withdrawal.UserId)
+		if err != nil {
+			return err
+		}
+		if lockedUsers[operation.ActorId].DeletedAt.Valid {
+			return gorm.ErrRecordNotFound
+		}
+		if operation.ActorType == PromotionWithdrawalActorUser && operation.ActorId != withdrawal.UserId {
+			return errors.New("invalid withdrawal operation actor")
+		}
+		if operation.ActorType == PromotionWithdrawalActorAdmin &&
+			lockedUsers[operation.ActorId].Role != common.RoleAdminUser &&
+			lockedUsers[operation.ActorId].Role != common.RoleRootUser {
+			return errors.New("invalid withdrawal operation actor")
+		}
+	}
+	operation.Note = strings.TrimSpace(operation.Note)
+	operation.ExternalReference = strings.TrimSpace(operation.ExternalReference)
+	if (operation.Action == PromotionWithdrawalActionPayoutInitiated ||
+		operation.Action == PromotionWithdrawalActionPayoutFailed ||
+		operation.Action == PromotionWithdrawalActionPaid ||
+		operation.Action == PromotionWithdrawalActionCancelledByRefund) && operation.ExternalReference == "" {
+		return ErrPromotionWithdrawalPayoutReferenceRequired
+	}
+	return tx.Create(operation).Error
+}
+
+func LockPromotionWithdrawalTx(tx *gorm.DB, id int) (*PromotionWithdrawal, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required")
+	}
+	if id <= 0 {
+		return nil, errors.New("invalid withdrawal")
+	}
+	var withdrawal PromotionWithdrawal
+	if err := lockForUpdate(tx).Where("id = ?", id).First(&withdrawal).Error; err != nil {
+		return nil, err
+	}
+	return &withdrawal, nil
+}
+
+// EnsurePromotionFundOutflowAllowedTx is the shared durable barrier for every
+// referral-credit or cash-commission outflow. The user row lock serializes the
+// check with refund recovery updates; the obligation query also protects
+// legacy/inconsistent rows where refund_hold was not persisted correctly.
+func EnsurePromotionFundOutflowAllowedTx(tx *gorm.DB, userId int) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if userId <= 0 {
+		return errors.New("invalid user")
+	}
+	held, err := isPromotionFundOutflowFenced(userId)
+	if err != nil {
+		return err
+	}
+	if held {
+		return ErrUserRefundHeld
+	}
+
+	var user User
+	if err := lockForUpdate(tx).Select("id", "refund_hold").Where("id = ?", userId).First(&user).Error; err != nil {
+		return err
+	}
+	if user.RefundHold {
+		return ErrUserRefundHeld
+	}
+	var openObligations int64
+	if err := tx.Model(&PromotionRefundObligation{}).
+		Where("user_id = ? AND status = ?", userId, PromotionRefundObligationStatusOpen).
+		Count(&openObligations).Error; err != nil {
+		return err
+	}
+	if openObligations > 0 {
+		return ErrUserRefundHeld
+	}
+	held, err = isPromotionFundOutflowFenced(userId)
+	if err != nil {
+		return err
+	}
+	if held {
+		return ErrUserRefundHeld
+	}
+	return nil
+}
+
+func isPromotionFundOutflowFenced(userId int) (bool, error) {
+	if isLocalUserRefundHeld(userId) {
+		return true, nil
+	}
+	if !common.RedisEnabled {
+		return false, nil
+	}
+	exists, err := common.RDB.Exists(context.Background(), userRefundHoldKey(userId)).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists > 0, nil
+}
+
+func LoadPromotionWithdrawalOperationsTx(tx *gorm.DB, withdrawal *PromotionWithdrawal) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if withdrawal == nil || withdrawal.Id <= 0 {
+		return errors.New("invalid withdrawal")
+	}
+	return tx.Where("withdrawal_id = ?", withdrawal.Id).
+		Order("created_at ASC").
+		Order("id ASC").
+		Find(&withdrawal.Operations).Error
+}
+
+// validatePromotionWithdrawalLedgerIntegrityTx proves that a withdrawal is
+// exactly the sum of the commission ledgers assigned to it. Status-specific
+// checks stay with the caller, while ownership, currency, and amount
+// invariants are shared by payout, refund, and migration paths.
+func validatePromotionWithdrawalLedgerIntegrityTx(tx *gorm.DB, withdrawal *PromotionWithdrawal) ([]PromotionWithdrawalItem, []PromotionCommissionLedger, error) {
+	if tx == nil {
+		return nil, nil, errors.New("transaction is required")
+	}
+	if withdrawal == nil || withdrawal.Id <= 0 || withdrawal.UserId <= 0 ||
+		withdrawal.GrossAmountCents <= 0 || withdrawal.FeeAmountCents < 0 ||
+		withdrawal.TaxAmountCents < 0 || withdrawal.NetAmountCents <= 0 {
+		return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+	}
+	currency := strings.ToUpper(strings.TrimSpace(withdrawal.Currency))
+	if withdrawal.Currency != currency || !isISOCurrencyCode(currency) ||
+		withdrawal.FeeAmountCents > withdrawal.GrossAmountCents ||
+		withdrawal.TaxAmountCents > withdrawal.GrossAmountCents-withdrawal.FeeAmountCents ||
+		withdrawal.NetAmountCents != withdrawal.GrossAmountCents-withdrawal.FeeAmountCents-withdrawal.TaxAmountCents {
+		return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	var items []PromotionWithdrawalItem
+	if err := tx.Where("withdrawal_id = ?", withdrawal.Id).Order("id ASC").Find(&items).Error; err != nil {
+		return nil, nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	ledgerIds := make([]int, 0, len(items))
+	seenLedgerIds := make(map[int]struct{}, len(items))
+	itemTotal := int64(0)
+	for i := range items {
+		item := &items[i]
+		if item.WithdrawalId != withdrawal.Id || item.LedgerId <= 0 || item.AmountCents <= 0 ||
+			itemTotal > math.MaxInt64-item.AmountCents {
+			return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+		}
+		if _, exists := seenLedgerIds[item.LedgerId]; exists {
+			return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+		}
+		seenLedgerIds[item.LedgerId] = struct{}{}
+		ledgerIds = append(ledgerIds, item.LedgerId)
+		itemTotal += item.AmountCents
+	}
+	if itemTotal != withdrawal.GrossAmountCents {
+		return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+	}
+
+	var ledgers []PromotionCommissionLedger
+	if err := lockForUpdate(tx).Where("id IN ?", ledgerIds).Order("id ASC").Find(&ledgers).Error; err != nil {
+		return nil, nil, err
+	}
+	if len(ledgers) != len(ledgerIds) {
+		return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+	}
+	ledgerById := make(map[int]*PromotionCommissionLedger, len(ledgers))
+	for i := range ledgers {
+		ledger := &ledgers[i]
+		if ledger.UserId != withdrawal.UserId || ledger.NetAmountCents <= 0 ||
+			strings.ToUpper(strings.TrimSpace(ledger.Currency)) != currency || ledger.Currency != currency {
+			return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+		}
+		ledgerById[ledger.Id] = ledger
+	}
+	for i := range items {
+		ledger := ledgerById[items[i].LedgerId]
+		if ledger == nil || items[i].AmountCents != ledger.NetAmountCents {
+			return nil, nil, ErrPromotionWithdrawalLedgerNotPayable
+		}
+	}
+	return items, ledgers, nil
+}
+
+// ValidatePromotionWithdrawalLedgerIntegrityTx verifies the immutable
+// withdrawal-to-ledger relationship without requiring the commissions to
+// remain payable. Rejection and failed-payout paths use this to safely return
+// already-reserved ledgers after a later eligibility check has failed.
+func ValidatePromotionWithdrawalLedgerIntegrityTx(tx *gorm.DB, withdrawalId int) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if withdrawalId <= 0 {
+		return ErrPromotionWithdrawalLedgerNotPayable
+	}
+	withdrawal, err := LockPromotionWithdrawalTx(tx, withdrawalId)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrPromotionWithdrawalLedgerNotPayable
+		}
+		return err
+	}
+	_, _, err = validatePromotionWithdrawalLedgerIntegrityTx(tx, withdrawal)
+	return err
+}
+
+// ValidatePromotionWithdrawalPaidTransactionTx treats the immutable payout
+// journal as the economic proof that reserved commission already left the
+// platform. A processing status alone is never proof of payment.
+func ValidatePromotionWithdrawalPaidTransactionTx(tx *gorm.DB, withdrawal *PromotionWithdrawal) (bool, error) {
+	if tx == nil {
+		return false, errors.New("transaction is required")
+	}
+	if withdrawal == nil || withdrawal.Id <= 0 {
+		return false, errors.New("invalid withdrawal")
+	}
+
+	var payout PromotionFundTransaction
+	payoutKeys := []string{
+		fmt.Sprintf("withdrawal:%d:paid", withdrawal.Id),
+		fmt.Sprintf("pfb:promotion_withdrawals:%d:paid", withdrawal.Id),
+	}
+	found := false
+	for _, payoutKey := range payoutKeys {
+		err := lockForUpdate(tx).Preload("Legs", func(legTx *gorm.DB) *gorm.DB {
+			return legTx.Order("id ASC")
+		}).Where("transaction_key = ?", payoutKey).First(&payout).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		found = true
+		break
+	}
+	if !found {
+		return false, nil
+	}
+
+	items, ledgers, err := validatePromotionWithdrawalLedgerIntegrityTx(tx, withdrawal)
+	if err != nil {
+		return true, err
+	}
+	if payout.Kind != PromotionFundKindCommissionWithdrawalPaid ||
+		payout.UserId != withdrawal.UserId ||
+		payout.SourceType != "promotion_withdrawals" ||
+		payout.SourceId != withdrawal.Id ||
+		payout.ExternalRef != withdrawal.TradeNo ||
+		len(payout.Legs) != len(items) {
+		return true, ErrPromotionFundTransactionConflict
+	}
+
+	for i := range items {
+		item := items[i]
+		leg := payout.Legs[i]
+		if leg.Account != PromotionFundAccountCommissionReserved ||
+			leg.Asset != PromotionFundAssetCash ||
+			leg.Currency != withdrawal.Currency ||
+			leg.Amount != -item.AmountCents ||
+			leg.SourceType != "promotion_commission_ledgers" ||
+			leg.SourceId != item.LedgerId {
+			return true, ErrPromotionFundTransactionConflict
+		}
+	}
+
+	// A later refund legitimately moves a paid ledger from withdrawn to
+	// reversed. The immutable payout journal remains the proof that cash left
+	// the platform, so both states are valid when confirming historical payment.
+	for i := range ledgers {
+		if ledgers[i].Status != PromotionCommissionStatusWithdrawn && ledgers[i].Status != PromotionCommissionStatusReversed {
+			return true, ErrPromotionWithdrawalLedgerNotPayable
+		}
+	}
+	return true, nil
+}
+
 func CreatePromotionCommissionLedgerTx(tx *gorm.DB, ledger *PromotionCommissionLedger) error {
 	if tx == nil {
 		return errors.New("transaction is required")
@@ -150,8 +534,31 @@ func CreatePromotionCommissionLedgerTx(tx *gorm.DB, ledger *PromotionCommissionL
 		return err
 	}
 	eventType := PromotionEventTypeCommissionPending
+	account := PromotionFundAccountCommissionPending
+	kind := PromotionFundKindCommissionPendingAccrued
 	if ledger.Status == PromotionCommissionStatusSettled {
 		eventType = PromotionEventTypeCommissionSettled
+		account = PromotionFundAccountCommissionAvailable
+		kind = PromotionFundKindCommissionAvailableAccrued
+	}
+	if ledger.NetAmountCents > 0 {
+		if err := CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+			TransactionKey: fmt.Sprintf("commission:%d:accrued", ledger.Id),
+			Kind:           kind,
+			UserId:         ledger.UserId,
+			SourceType:     "promotion_commission_ledgers",
+			SourceId:       ledger.Id,
+			SourceKey:      fmt.Sprintf("%s:%d", ledger.SourceType, ledger.SourceId),
+			ActorType:      "system",
+			ExternalRef:    ledger.SourceTradeNo,
+			Remark:         ledger.Remark,
+			OccurredAt:     ledger.CreatedAt,
+		}, []PromotionFundTransactionLeg{{
+			Account: account, Asset: PromotionFundAssetCash, Currency: ledger.Currency, Amount: ledger.NetAmountCents,
+			SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+		}}); err != nil {
+			return err
+		}
 	}
 	return CreatePromotionCommissionEventTx(tx, ledger, eventType)
 }
@@ -196,7 +603,44 @@ func SettlePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId 
 	if err := tx.Where("source_type = ? AND source_id = ?", sourceType, sourceId).First(&ledger).Error; err != nil {
 		return err
 	}
-	return CreatePromotionCommissionEventTx(tx, &ledger, PromotionEventTypeCommissionSettled)
+	if err := CreatePromotionCommissionEventTx(tx, &ledger, PromotionEventTypeCommissionSettled); err != nil {
+		return err
+	}
+	if ledger.NetAmountCents <= 0 {
+		return nil
+	}
+	return CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+		TransactionKey: fmt.Sprintf("commission:%d:settled", ledger.Id),
+		Kind:           PromotionFundKindCommissionSettled,
+		UserId:         ledger.UserId,
+		SourceType:     "promotion_commission_ledgers",
+		SourceId:       ledger.Id,
+		SourceKey:      fmt.Sprintf("%s:%d", ledger.SourceType, ledger.SourceId),
+		ActorType:      "system",
+		ExternalRef:    ledger.SourceTradeNo,
+		Remark:         ledger.Remark,
+		OccurredAt:     ledger.SettledAt,
+	}, []PromotionFundTransactionLeg{
+		{
+			Account: PromotionFundAccountCommissionPending, Asset: PromotionFundAssetCash, Currency: ledger.Currency, Amount: -ledger.NetAmountCents,
+			SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+		},
+		{
+			Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash, Currency: ledger.Currency, Amount: ledger.NetAmountCents,
+			SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+		},
+	})
+}
+
+// AvailablePromotionCommissionLedgersQuery is the single eligibility rule for
+// cash commission shown as available or selected for an outflow.
+func AvailablePromotionCommissionLedgersQuery(db *gorm.DB, userId int) *gorm.DB {
+	verifiedRebateIds := db.Model(&InvitationRebate{}).
+		Select("id").
+		Where("paid_amount_verified = ?", true)
+	return db.Model(&PromotionCommissionLedger{}).
+		Where("user_id = ? AND status = ? AND cashable = ? AND currency = ?", userId, PromotionCommissionStatusSettled, true, "CNY").
+		Where("source_type <> ? OR source_id IN (?)", PromotionCommissionSourceTopUpRebate, verifiedRebateIds)
 }
 
 // LockSettledPromotionCommissionLedgersTx returns the CNY commission rows
@@ -207,13 +651,8 @@ func LockSettledPromotionCommissionLedgersTx(tx *gorm.DB, userId int) ([]*Promot
 	if tx == nil {
 		return nil, errors.New("transaction is required")
 	}
-	verifiedRebateIds := tx.Model(&InvitationRebate{}).
-		Select("id").
-		Where("paid_amount_verified = ?", true)
 	var ledgers []*PromotionCommissionLedger
-	err := lockForUpdate(tx).
-		Where("user_id = ? AND status = ? AND cashable = ? AND currency = ?", userId, PromotionCommissionStatusSettled, true, "CNY").
-		Where("source_type <> ? OR source_id IN (?)", PromotionCommissionSourceTopUpRebate, verifiedRebateIds).
+	err := lockForUpdate(AvailablePromotionCommissionLedgersQuery(tx, userId)).
 		Order("id ASC").
 		Find(&ledgers).Error
 	return ledgers, err
@@ -231,33 +670,16 @@ func ValidatePromotionWithdrawalLedgersPayableTx(tx *gorm.DB, withdrawalId int) 
 		return ErrPromotionWithdrawalLedgerNotPayable
 	}
 
-	var items []PromotionWithdrawalItem
-	if err := tx.Where("withdrawal_id = ?", withdrawalId).Find(&items).Error; err != nil {
-		return err
-	}
-	if len(items) == 0 {
-		return ErrPromotionWithdrawalLedgerNotPayable
-	}
-
-	ledgerIds := make([]int, 0, len(items))
-	seenLedgerIds := make(map[int]struct{}, len(items))
-	for _, item := range items {
-		if item.LedgerId <= 0 {
+	withdrawal, err := LockPromotionWithdrawalTx(tx, withdrawalId)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrPromotionWithdrawalLedgerNotPayable
 		}
-		if _, exists := seenLedgerIds[item.LedgerId]; exists {
-			return ErrPromotionWithdrawalLedgerNotPayable
-		}
-		seenLedgerIds[item.LedgerId] = struct{}{}
-		ledgerIds = append(ledgerIds, item.LedgerId)
-	}
-
-	var ledgers []PromotionCommissionLedger
-	if err := lockForUpdate(tx).Where("id IN ?", ledgerIds).Find(&ledgers).Error; err != nil {
 		return err
 	}
-	if len(ledgers) != len(ledgerIds) {
-		return ErrPromotionWithdrawalLedgerNotPayable
+	_, ledgers, err := validatePromotionWithdrawalLedgerIntegrityTx(tx, withdrawal)
+	if err != nil {
+		return err
 	}
 
 	verifiedRebateIds := make(map[int]struct{})
@@ -327,6 +749,7 @@ func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId
 			return errors.New("commission reversal would exceed wallet quota range")
 		}
 	}
+	previousStatus := ledger.Status
 	result := tx.Model(&PromotionCommissionLedger{}).
 		Where("id = ? AND status = ?", ledger.Id, ledger.Status).
 		Updates(map[string]interface{}{
@@ -345,6 +768,70 @@ func ReversePromotionCommissionLedgerTx(tx *gorm.DB, sourceType string, sourceId
 	}
 	if err := tx.Where("id = ?", ledger.Id).First(&ledger).Error; err != nil {
 		return err
+	}
+	var legs []PromotionFundTransactionLeg
+	originalKey := fmt.Sprintf("commission:%d:accrued", ledger.Id)
+	backfillKey := fmt.Sprintf("pfb:promotion_commission_ledgers:%d:accrued", ledger.Id)
+	switch previousStatus {
+	case PromotionCommissionStatusPending:
+		if ledger.NetAmountCents > 0 {
+			legs = []PromotionFundTransactionLeg{{
+				Account: PromotionFundAccountCommissionPending, Asset: PromotionFundAssetCash,
+				Currency: ledger.Currency, Amount: -ledger.NetAmountCents,
+				SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+			}}
+		}
+	case PromotionCommissionStatusSettled:
+		if ledger.NetAmountCents > 0 {
+			legs = []PromotionFundTransactionLeg{{
+				Account: PromotionFundAccountCommissionAvailable, Asset: PromotionFundAssetCash,
+				Currency: ledger.Currency, Amount: -ledger.NetAmountCents,
+				SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+			}}
+		}
+	case PromotionCommissionStatusTransferred:
+		originalKey = fmt.Sprintf("commission:%d:transferred", ledger.Id)
+		backfillKey = fmt.Sprintf("pfb:promotion_commission_ledgers:%d:transferred", ledger.Id)
+		if ledger.QuotaEquivalent > 0 {
+			var user User
+			if err := tx.Select("quota").Where("id = ?", ledger.UserId).First(&user).Error; err != nil {
+				return err
+			}
+			balanceAfter := int64(user.Quota)
+			legs = []PromotionFundTransactionLeg{{
+				Account: PromotionFundAccountAPIBalance, Asset: PromotionFundAssetQuota,
+				Amount: -int64(ledger.QuotaEquivalent), SourceType: "promotion_commission_ledgers", SourceId: ledger.Id,
+				BalanceAfter: &balanceAfter,
+			}}
+		}
+	}
+	if len(legs) > 0 {
+		transaction := &PromotionFundTransaction{
+			TransactionKey: fmt.Sprintf("commission:%d:reversed", ledger.Id),
+			Kind:           PromotionFundKindCommissionReversed,
+			UserId:         ledger.UserId,
+			SourceType:     "promotion_commission_ledgers",
+			SourceId:       ledger.Id,
+			SourceKey:      fmt.Sprintf("%s:%d", ledger.SourceType, ledger.SourceId),
+			ActorType:      "system",
+			ExternalRef:    refundTradeNo,
+			Remark:         remark,
+			OccurredAt:     ledger.ReversedAt,
+		}
+		var original PromotionFundTransaction
+		originalErr := tx.Select("id").Where("transaction_key = ?", originalKey).First(&original).Error
+		if errors.Is(originalErr, gorm.ErrRecordNotFound) {
+			originalErr = tx.Select("id").Where("transaction_key = ?", backfillKey).First(&original).Error
+		}
+		if originalErr != nil && !errors.Is(originalErr, gorm.ErrRecordNotFound) {
+			return originalErr
+		}
+		if originalErr == nil {
+			transaction.ReversesTransactionId = original.Id
+		}
+		if err := CreatePromotionFundTransactionTx(tx, transaction, legs); err != nil {
+			return err
+		}
 	}
 	return CreatePromotionCommissionEventTx(tx, &ledger, PromotionEventTypeCommissionReversed)
 }
@@ -371,6 +858,40 @@ func ListPromotionWithdrawals(userId int, pageInfo *common.PageInfo) ([]*Promoti
 	var withdrawals []*PromotionWithdrawal
 	err := DB.Where("user_id = ?", userId).
 		Order("id DESC").
+		Limit(pageInfo.GetPageSize()).
+		Offset(pageInfo.GetStartIdx()).
+		Find(&withdrawals).Error
+	return withdrawals, total, err
+}
+
+func GetPromotionWithdrawal(userId int, id int) (*PromotionWithdrawal, error) {
+	var withdrawal PromotionWithdrawal
+	err := DB.Where("id = ? AND user_id = ?", id, userId).First(&withdrawal).Error
+	return &withdrawal, err
+}
+
+func GetPromotionWithdrawalById(id int) (*PromotionWithdrawal, error) {
+	var withdrawal PromotionWithdrawal
+	err := DB.Preload("Operations", func(tx *gorm.DB) *gorm.DB {
+		return tx.Order("created_at ASC").Order("id ASC")
+	}).Where("id = ?", id).First(&withdrawal).Error
+	return &withdrawal, err
+}
+
+func ListAdminPromotionWithdrawals(pageInfo *common.PageInfo, status string) ([]*PromotionWithdrawal, int64, error) {
+	query := DB.Model(&PromotionWithdrawal{})
+	if status != "" && status != "all" {
+		query = query.Where("status = ?", status)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var withdrawals []*PromotionWithdrawal
+	err := query.Preload("Operations", func(tx *gorm.DB) *gorm.DB {
+		return tx.Order("created_at ASC").Order("id ASC")
+	}).Order("id DESC").
 		Limit(pageInfo.GetPageSize()).
 		Offset(pageInfo.GetStartIdx()).
 		Find(&withdrawals).Error

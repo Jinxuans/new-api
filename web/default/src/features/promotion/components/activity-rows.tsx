@@ -22,7 +22,11 @@ import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
 import {
-  formatCashCents,
+  getPromotionFundAccountLabelKey,
+  getPromotionFundKindTitleKey,
+  getPromotionFundSourceLabelKey,
+} from '@/features/promotion/fund-record-copy'
+import {
   formatTime,
   rewardItemCopy,
   statusVariant,
@@ -30,27 +34,26 @@ import {
   type GrowthSubmission,
   type InvitationReward,
   type PromotionCommissionLedger,
-  type PromotionEvent,
+  type PromotionFundTransaction,
+  type PromotionFundTransactionLeg,
   type PromotionWithdrawal,
 } from '@/features/promotion/shared'
+import { formatMinorAmount } from '@/lib/currency'
 import { formatQuota } from '@/lib/format'
 
 import type { PromotionActivityFilter, PromotionActivityItem } from '../api'
 
-const EVENT_TITLES: Record<string, string> = {
-  invitation_register_reward: 'Invitation registration reward',
-  invitation_first_request_reward: 'Invitation first request reward',
-  invitation_first_topup_reward: 'Invitation first top-up reward',
-  commission_pending: 'Cash commission pending settlement',
-  commission_settled: 'Cash commission settled',
-  commission_transferred: 'Cash commission converted to API balance',
-  promotion_reward_transferred: 'Referral credit transferred to API balance',
-  commission_withdraw_submitted: 'Cash withdrawal request submitted',
-  commission_withdraw_approved: 'Cash withdrawal request approved',
-  commission_withdraw_rejected: 'Cash withdrawal request rejected',
-  commission_withdraw_paid: 'Cash withdrawal paid',
-  commission_reversed: 'Cash commission reversed',
-  growth_reward_settled: 'Task reward settled',
+function withStableKeys<T>(
+  records: T[],
+  getBaseKey: (record: T) => string
+): { key: string; record: T }[] {
+  const occurrences = new Map<string, number>()
+  return records.map((record) => {
+    const baseKey = getBaseKey(record)
+    const occurrence = (occurrences.get(baseKey) || 0) + 1
+    occurrences.set(baseKey, occurrence)
+    return { key: `${baseKey}:${occurrence}`, record }
+  })
 }
 
 type ActivityRowProps = {
@@ -86,62 +89,101 @@ function ActivityRow(props: ActivityRowProps) {
   )
 }
 
-function EventRow(props: { event: PromotionEvent }) {
+function formatFundLegAmount(leg: PromotionFundTransactionLeg) {
+  const absoluteAmount = Math.abs(Number(leg.amount || 0))
+  const amount =
+    leg.asset === 'cash'
+      ? formatMinorAmount(absoluteAmount, leg.currency || 'CNY')
+      : formatQuota(absoluteAmount)
+  return `${leg.amount > 0 ? '+' : '-'}${amount}`
+}
+
+function FundTransactionRow(props: { transaction: PromotionFundTransaction }) {
   const { t } = useTranslation()
-  const quota = Number(props.event.quota_delta || 0)
-  const cash = Number(props.event.cash_amount_cents || 0)
-  const currency = props.event.currency || 'CNY'
-  const quotaAmount = quota
-    ? `${quota > 0 ? '+' : '-'}${formatQuota(Math.abs(quota))}`
-    : ''
-  const cashAmount = cash
-    ? `${cash > 0 ? '+' : '-'}${formatCashCents(Math.abs(cash), currency)}`
-    : ''
-  let amount = quotaAmount || cashAmount || '-'
-  let cashContext = ''
-
-  switch (props.event.event_type) {
-    case 'commission_pending':
-    case 'commission_settled':
-    case 'commission_reversed':
-    case 'commission_withdraw_paid':
-      amount = cashAmount || '-'
-      break
-    case 'commission_withdraw_submitted':
-    case 'commission_withdraw_approved':
-    case 'commission_withdraw_rejected':
-      amount = cash ? formatCashCents(Math.abs(cash), currency) : '-'
-      break
-    case 'commission_transferred':
-      amount = quotaAmount || '-'
-      if (cash) {
-        cashContext = `${t('Cash commission')}: ${formatCashCents(
-          Math.abs(cash),
-          currency
-        )}`
-      }
-      break
-  }
-
-  const detail = [
-    formatTime(props.event.created_at),
-    cashContext,
-    props.event.remark,
-  ]
-    .filter(Boolean)
-    .join(' · ')
+  const transaction = props.transaction
+  const sourceLabel = getPromotionFundSourceLabelKey(transaction.source || '')
 
   return (
-    <ActivityRow
-      title={t(
-        EVENT_TITLES[props.event.event_type] ||
-          props.event.title ||
-          props.event.event_type
-      )}
-      detail={detail}
-      status={props.event.status}
-      amount={amount}
-    />
+    <article className='flex flex-col gap-3 p-3'>
+      <header className='flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4'>
+        <div className='min-w-0'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <h3 className='text-sm font-medium'>
+              {t(getPromotionFundKindTitleKey(transaction.kind))}
+            </h3>
+            <Badge variant='outline'>
+              {t('{{count}} account changes', {
+                count: transaction.legs?.length || 0,
+              })}
+            </Badge>
+          </div>
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {formatTime(transaction.occurred_at)} · {t('Source')}:{' '}
+            {t(sourceLabel)}
+          </p>
+        </div>
+      </header>
+
+      <ul className='divide-y rounded-md border'>
+        {withStableKeys(transaction.legs || [], (leg) =>
+          [
+            leg.account,
+            leg.asset,
+            leg.currency || '',
+            leg.amount,
+            leg.balance_after ?? '',
+          ].join(':')
+        ).map(({ key, record: leg }) => {
+          const account = t(getPromotionFundAccountLabelKey(leg.account))
+          let direction = t('Debited from {{account}}', { account })
+          if (leg.account === 'refund_debt') {
+            direction =
+              leg.amount > 0
+                ? t('Debt increased in {{account}}', { account })
+                : t('Debt reduced in {{account}}', { account })
+          } else if (leg.amount > 0) {
+            direction = t('Credited to {{account}}', { account })
+          }
+          return (
+            <li
+              key={key}
+              className='flex flex-col gap-1 px-3 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4'
+            >
+              <div className='min-w-0 text-xs font-medium'>{direction}</div>
+              <div className='shrink-0 text-xs tabular-nums sm:text-right'>
+                <div className='font-semibold'>{formatFundLegAmount(leg)}</div>
+                {leg.balance_after !== null &&
+                leg.balance_after !== undefined ? (
+                  <div className='text-muted-foreground mt-0.5'>
+                    {t('Balance after')}:{' '}
+                    {leg.asset === 'cash'
+                      ? formatMinorAmount(
+                          leg.balance_after,
+                          leg.currency || 'CNY'
+                        )
+                      : formatQuota(leg.balance_after)}
+                  </div>
+                ) : null}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      {transaction.external_ref ? (
+        <details className='text-xs'>
+          <summary className='focus-visible:ring-ring cursor-pointer rounded-sm font-medium outline-none focus-visible:ring-2'>
+            {t('Audit references')}
+          </summary>
+          <dl className='text-muted-foreground mt-2 grid gap-1 break-words'>
+            <div>
+              <dt className='inline font-medium'>{t('External reference')}:</dt>{' '}
+              <dd className='inline'>{transaction.external_ref}</dd>
+            </div>
+          </dl>
+        </details>
+      ) : null}
+    </article>
   )
 }
 
@@ -150,26 +192,48 @@ function renderRows(
   items: PromotionActivityItem[],
   t: TFunction
 ) {
-  if (filter === 'all') {
-    return (items as PromotionEvent[]).map((event) => (
-      <EventRow key={event.id} event={event} />
+  if (filter === 'funds') {
+    return withStableKeys(items as PromotionFundTransaction[], (transaction) =>
+      [
+        transaction.kind,
+        transaction.occurred_at || transaction.created_at || '',
+        transaction.external_ref || '',
+        JSON.stringify(transaction.legs || []),
+      ].join(':')
+    ).map(({ key, record: transaction }) => (
+      <FundTransactionRow key={key} transaction={transaction} />
     ))
   }
   if (filter === 'tasks') {
-    return (items as GrowthReward[]).map((reward) => (
+    return withStableKeys(items as GrowthReward[], (reward) =>
+      [
+        reward.item_code,
+        reward.created_at,
+        reward.settled_at || '',
+        reward.reward_quota,
+        reward.status,
+      ].join(':')
+    ).map(({ key, record: reward }) => (
       <ActivityRow
-        key={reward.id}
+        key={key}
         title={t(rewardItemCopy[reward.item_code]?.title || reward.item_code)}
-        detail={`${formatTime(reward.created_at)}${reward.remark ? ` · ${t(reward.remark)}` : ''}`}
+        detail={formatTime(reward.created_at)}
         status={reward.status}
         amount={formatQuota(reward.reward_quota)}
       />
     ))
   }
   if (filter === 'submissions') {
-    return (items as GrowthSubmission[]).map((submission) => (
+    return withStableKeys(items as GrowthSubmission[], (submission) =>
+      [
+        submission.item_code,
+        submission.created_at,
+        submission.url || '',
+        submission.status,
+      ].join(':')
+    ).map(({ key, record: submission }) => (
       <ActivityRow
-        key={submission.id}
+        key={key}
         title={t(
           rewardItemCopy[submission.item_code]?.title || submission.item_code
         )}
@@ -184,27 +248,46 @@ function renderRows(
       first_request: 'Invitation first request reward',
       first_topup: 'Invitation first top-up reward',
     }
-    return (items as InvitationReward[]).map((reward) => (
+    return withStableKeys(items as InvitationReward[], (reward) =>
+      [
+        reward.reward_type,
+        reward.created_at,
+        reward.settled_at || '',
+        reward.invitee_name || '',
+        reward.reward_quota,
+        reward.status,
+      ].join(':')
+    ).map(({ key, record: reward }) => (
       <ActivityRow
-        key={reward.id}
+        key={key}
         title={t(titleByType[reward.reward_type] || 'Referral reward')}
-        detail={`${reward.invitee_name || `#${reward.invitee_id}`} · ${formatTime(reward.created_at)}${reward.remark ? ` · ${reward.remark}` : ''}`}
+        detail={`${reward.invitee_name || t('User')} · ${formatTime(reward.created_at)}`}
         status={reward.status}
         amount={formatQuota(reward.reward_quota)}
       />
     ))
   }
   if (filter === 'commissions') {
-    return (items as PromotionCommissionLedger[]).map((commission) => (
+    return withStableKeys(items as PromotionCommissionLedger[], (commission) =>
+      [
+        commission.created_at,
+        commission.currency,
+        commission.net_amount_cents,
+        commission.status,
+        commission.available_at || '',
+        commission.settled_at || '',
+        commission.reversed_at || '',
+      ].join(':')
+    ).map(({ key, record: commission }) => (
       <ActivityRow
-        key={commission.id}
+        key={key}
         title={t('Top-up cash commission')}
         detail={t('{{time}} · {{quota}} API balance equivalent', {
           time: formatTime(commission.created_at),
           quota: formatQuota(commission.quota_equivalent || 0),
         })}
         status={commission.status}
-        amount={formatCashCents(
+        amount={formatMinorAmount(
           commission.net_amount_cents,
           commission.currency
         )}
@@ -217,7 +300,10 @@ function renderRows(
       title={withdrawal.payout_method || t('Cash withdrawal')}
       detail={`${formatTime(withdrawal.applied_at)}${withdrawal.trade_no ? ` · ${withdrawal.trade_no}` : ''}`}
       status={withdrawal.status}
-      amount={formatCashCents(withdrawal.net_amount_cents, withdrawal.currency)}
+      amount={formatMinorAmount(
+        withdrawal.net_amount_cents,
+        withdrawal.currency
+      )}
     />
   ))
 }

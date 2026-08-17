@@ -21,6 +21,18 @@ const UserNameMaxLength = 20
 const affCodeLength = 8
 const affCodeGenerateMaxAttempts = 12
 
+const (
+	promotionFundKindNewUserRegistrationRewardIssued = "new_user_registration_reward_issued"
+	promotionFundKindInviteeRegistrationRewardIssued = "invitee_registration_reward_issued"
+	promotionFundSourceUserRegistration              = "user_registration"
+	promotionFundSourceInvitationRegistration        = "invitation_registration"
+)
+
+var (
+	ErrUserRefundRecoveryPending = errors.New("user cannot be deleted while refund recovery is pending")
+	ErrUserFinancialHistory      = errors.New("user referenced by payment, promotion, or financial audit history cannot be permanently deleted")
+)
+
 var userSortColumns = map[string]string{
 	"id":            "id",
 	"username":      "username",
@@ -95,6 +107,8 @@ type User struct {
 	VerificationCode string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
 	AccessToken      *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
 	Quota            int                        `json:"quota" gorm:"type:int;default:0"`
+	RefundDebtQuota  int64                      `json:"refund_debt_quota" gorm:"type:bigint;not null;default:0"`
+	RefundHold       bool                       `json:"refund_hold" gorm:"index"`
 	UsedQuota        int                        `json:"used_quota" gorm:"type:int;default:0;column:used_quota"` // used quota
 	RequestCount     int                        `json:"request_count" gorm:"type:int;default:0;"`               // request number
 	Group            string                     `json:"group" gorm:"type:varchar(64);default:'default'"`
@@ -116,16 +130,18 @@ type User struct {
 
 func (user *User) ToBaseUser() *UserBase {
 	cache := &UserBase{
-		Id:          user.Id,
-		Group:       user.Group,
-		Quota:       user.Quota,
-		Status:      user.Status,
-		Role:        user.Role,
-		Username:    user.Username,
-		Setting:     user.Setting,
-		Email:       user.Email,
-		AuthVersion: user.AuthVersion,
-		CacheSchema: userCacheSchemaVersion,
+		Id:              user.Id,
+		Group:           user.Group,
+		Quota:           user.Quota,
+		RefundDebtQuota: user.RefundDebtQuota,
+		RefundHold:      user.RefundHold,
+		Status:          user.Status,
+		Role:            user.Role,
+		Username:        user.Username,
+		Setting:         user.Setting,
+		Email:           user.Email,
+		AuthVersion:     user.AuthVersion,
+		CacheSchema:     userCacheSchemaVersion,
 	}
 	return cache
 }
@@ -588,24 +604,133 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 		return tx.Error
 	}
 	defer tx.Rollback() // 确保在函数退出时事务能回滚
+	if err := EnsurePromotionFundOutflowAllowedTx(tx, user.Id); err != nil {
+		return err
+	}
 
 	// 加锁查询用户以确保数据一致性
-	err := lockForUpdate(tx).First(user, user.Id).Error
+	var lockedUser User
+	err := lockForUpdate(tx).First(&lockedUser, user.Id).Error
 	if err != nil {
 		return err
 	}
 
 	// 再次检查用户的AffQuota是否足够
-	if user.AffQuota < quota {
+	if lockedUser.AffQuota < quota {
 		return errors.New("邀请额度不足！")
 	}
 	maxCurrentQuota, err := topUpQuotaMaxCurrent(quota)
-	if err != nil || user.Quota > maxCurrentQuota {
+	if err != nil || lockedUser.Quota > maxCurrentQuota {
 		return ErrTopUpQuotaLimitExceeded
 	}
 
+	var rewards []InvitationReward
+	if err := lockForUpdate(tx).
+		Where("inviter_id = ? AND status = ? AND reward_quota > transferred_quota", lockedUser.Id, InvitationRewardStatusSettled).
+		Order("settled_at ASC, id ASC").
+		Find(&rewards).Error; err != nil {
+		return err
+	}
+	liveRewardIds := make(map[int]struct{}, len(rewards))
+	if len(rewards) > 0 {
+		rewardIds := make([]int, 0, len(rewards))
+		rewardTransactionKeys := make([]string, 0, len(rewards))
+		for i := range rewards {
+			rewardIds = append(rewardIds, rewards[i].Id)
+			rewardTransactionKeys = append(rewardTransactionKeys, fmt.Sprintf("invitation_reward:%d:issued", rewards[i].Id))
+		}
+		var issuedTransactions []PromotionFundTransaction
+		if err := tx.Select("source_id").
+			Where("user_id = ? AND source_type = ? AND source_id IN ? AND kind = ? AND transaction_key IN ?",
+				lockedUser.Id, "invitation_rewards", rewardIds, PromotionFundKindInvitationRewardIssued, rewardTransactionKeys).
+			Find(&issuedTransactions).Error; err != nil {
+			return err
+		}
+		for _, transaction := range issuedTransactions {
+			liveRewardIds[transaction.SourceId] = struct{}{}
+		}
+	}
+
+	trackedAvailable := 0
+	for i := range rewards {
+		reward := &rewards[i]
+		if _, tracked := liveRewardIds[reward.Id]; !tracked {
+			continue
+		}
+		if reward.TransferredQuota < 0 || reward.TransferredQuota > reward.RewardQuota {
+			return errors.New("邀请奖励转移记录不一致")
+		}
+		available := reward.RewardQuota - reward.TransferredQuota
+		if trackedAvailable > common.MaxQuota-available {
+			return errors.New("邀请奖励可用额度溢出")
+		}
+		trackedAvailable += available
+	}
+	if trackedAvailable > lockedUser.AffQuota {
+		return errors.New("邀请奖励来源与可用额度不一致")
+	}
+	// Any balance without a live issuance journal predates source-precise
+	// accounting. Treat that aggregate as the oldest FIFO source so a transfer
+	// cannot consume a newer tracked reward while leaving historical credit.
+	legacyAvailable := lockedUser.AffQuota - trackedAvailable
+	remaining := quota
+	legs := make([]PromotionFundTransactionLeg, 0, len(rewards)*2+2)
+	if legacyAvailable > 0 {
+		allocation := legacyAvailable
+		if allocation > remaining {
+			allocation = remaining
+		}
+		legs = append(legs,
+			PromotionFundTransactionLeg{
+				Account: PromotionFundAccountReferralCredit, Asset: PromotionFundAssetQuota, Amount: -int64(allocation),
+				SourceType: PromotionFundSourceLegacyAggregate,
+			},
+			PromotionFundTransactionLeg{
+				Account: PromotionFundAccountAPIBalance, Asset: PromotionFundAssetQuota, Amount: int64(allocation),
+				SourceType: PromotionFundSourceLegacyAggregate,
+			},
+		)
+		remaining -= allocation
+	}
+	for i := range rewards {
+		reward := &rewards[i]
+		if remaining == 0 {
+			break
+		}
+		if _, tracked := liveRewardIds[reward.Id]; !tracked {
+			continue
+		}
+		allocation := reward.RewardQuota - reward.TransferredQuota
+		if allocation > remaining {
+			allocation = remaining
+		}
+		result := tx.Model(&InvitationReward{}).
+			Where("id = ? AND status = ? AND transferred_quota = ?", reward.Id, InvitationRewardStatusSettled, reward.TransferredQuota).
+			Update("transferred_quota", reward.TransferredQuota+allocation)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("邀请奖励转移状态已变化，请重试")
+		}
+		legs = append(legs,
+			PromotionFundTransactionLeg{
+				Account: PromotionFundAccountReferralCredit, Asset: PromotionFundAssetQuota, Amount: -int64(allocation),
+				SourceType: "invitation_rewards", SourceId: reward.Id,
+			},
+			PromotionFundTransactionLeg{
+				Account: PromotionFundAccountAPIBalance, Asset: PromotionFundAssetQuota, Amount: int64(allocation),
+				SourceType: "invitation_rewards", SourceId: reward.Id,
+			},
+		)
+		remaining -= allocation
+	}
+	if remaining != 0 {
+		return errors.New("邀请奖励来源分配不足")
+	}
+
 	result := tx.Model(&User{}).
-		Where("id = ? AND aff_quota >= ? AND quota <= ?", user.Id, quota, maxCurrentQuota).
+		Where("id = ? AND aff_quota >= ? AND quota <= ?", lockedUser.Id, quota, maxCurrentQuota).
 		Updates(map[string]interface{}{
 			"aff_quota": gorm.Expr("aff_quota - ?", quota),
 			"quota":     gorm.Expr("quota + ?", quota),
@@ -616,21 +741,49 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	if result.RowsAffected != 1 {
 		return errors.New("邀请额度或钱包状态已变化，请重试")
 	}
-	user.AffQuota -= quota
-	user.Quota += quota
+	lockedUser.AffQuota -= quota
+	lockedUser.Quota += quota
+	referralBalanceAfter := int64(lockedUser.AffQuota)
+	walletBalanceAfter := int64(lockedUser.Quota)
+	for i := len(legs) - 1; i >= 0; i-- {
+		if legs[i].Account == PromotionFundAccountAPIBalance && legs[i].BalanceAfter == nil {
+			legs[i].BalanceAfter = &walletBalanceAfter
+			break
+		}
+	}
+	for i := len(legs) - 1; i >= 0; i-- {
+		if legs[i].Account == PromotionFundAccountReferralCredit && legs[i].BalanceAfter == nil {
+			legs[i].BalanceAfter = &referralBalanceAfter
+			break
+		}
+	}
 	now := common.GetTimestamp()
-	if err := CreatePromotionEventTx(tx, &PromotionEvent{
-		EventKey:    fmt.Sprintf("%s:%s:%d:%d", PromotionEventTypePromotionRewardTransferred, PromotionEventSourceInvitationQuota, user.Id, now),
-		UserId:      user.Id,
+	event := &PromotionEvent{
+		EventKey:    fmt.Sprintf("%s:%s:%d:%s", PromotionEventTypePromotionRewardTransferred, PromotionEventSourceInvitationQuota, lockedUser.Id, common.GetRandomString(24)),
+		UserId:      lockedUser.Id,
 		EventType:   PromotionEventTypePromotionRewardTransferred,
 		SourceTable: PromotionEventSourceInvitationQuota,
-		SourceId:    int(now),
+		SourceId:    lockedUser.Id,
 		Direction:   PromotionEventDirectionIncome,
 		QuotaDelta:  quota,
 		Status:      GrowthRewardStatusTransferred,
 		Title:       "Promotion reward transferred to balance",
 		CreatedAt:   now,
-	}); err != nil {
+	}
+	if err := tx.Create(event).Error; err != nil {
+		return err
+	}
+	if err := CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+		TransactionKey: fmt.Sprintf("invitation_transfer:%d", event.Id),
+		Kind:           PromotionFundKindInvitationRewardTransferred,
+		UserId:         lockedUser.Id,
+		SourceType:     "promotion_events",
+		SourceId:       event.Id,
+		SourceKey:      event.EventKey,
+		ActorType:      "user",
+		ActorId:        lockedUser.Id,
+		OccurredAt:     event.CreatedAt,
+	}, legs); err != nil {
 		return err
 	}
 
@@ -638,8 +791,9 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	if err := tx.Commit().Error; err != nil {
 		return err
 	}
-	if err := InvalidateUserCache(user.Id); err != nil {
-		common.SysError(fmt.Sprintf("failed to invalidate user cache after invitation credit transfer: user_id=%d error=%v", user.Id, err))
+	*user = lockedUser
+	if err := InvalidateUserCache(lockedUser.Id); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user cache after invitation credit transfer: user_id=%d error=%v", lockedUser.Id, err))
 	}
 	return nil
 }
@@ -697,26 +851,7 @@ func ensureEmailAvailableWithTx(tx *gorm.DB, email string, excludeUserID int) er
 
 func (user *User) Insert(inviterId int) error {
 	if err := DB.Transaction(func(tx *gorm.DB) error {
-		return withNormalizedEmailLock(tx, user.Email, func(tx *gorm.DB) error {
-			if err := user.prepareForInsert(tx); err != nil {
-				return err
-			}
-			user.Quota = common.QuotaForNewUser
-			var err error
-			user.AffCode, err = generateUniqueAffCode(tx)
-			if err != nil {
-				return err
-			}
-
-			// 初始化用户设置，包括默认的边栏配置
-			if user.Setting == "" {
-				defaultSetting := dto.UserSetting{}
-				// 这里暂时不设置SidebarModules，因为需要在用户创建后根据角色设置
-				user.SetSetting(defaultSetting)
-			}
-
-			return tx.Create(user).Error
-		})
+		return user.insertWithInviterTx(tx, inviterId)
 	}); err != nil {
 		return err
 	}
@@ -744,12 +879,15 @@ func (user *User) finishInsert(inviterId int) {
 	if common.QuotaForNewUser > 0 {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", logger.LogQuota(common.QuotaForNewUser)))
 	}
-	if inviterId != 0 {
+	if user.InviterId != 0 {
 		if operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
-		_ = inviteUser(inviterId, user.Id)
+		_ = InvalidateUserCache(user.InviterId)
+		var reward InvitationReward
+		if err := DB.Where("invitee_id = ? AND reward_type = ?", user.Id, InvitationRewardTypeRegister).First(&reward).Error; err == nil && reward.RewardQuota > 0 {
+			RecordLog(user.InviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", logger.LogQuota(reward.RewardQuota)))
+		}
 	}
 }
 
@@ -761,11 +899,38 @@ func (user *User) FinishInsert(inviterId int) {
 // This is used for OAuth registration where user creation and binding need to be atomic.
 // Post-creation tasks (sidebar config, logs, inviter rewards) are handled after the transaction commits.
 func (user *User) InsertWithTx(tx *gorm.DB, inviterId int) error {
+	return user.insertWithInviterTx(tx, inviterId)
+}
+
+func (user *User) insertWithInviterTx(tx *gorm.DB, inviterId int) error {
 	return withNormalizedEmailLock(tx, user.Email, func(tx *gorm.DB) error {
 		if err := user.prepareForInsert(tx); err != nil {
 			return err
 		}
-		user.Quota = common.QuotaForNewUser
+		if inviterId > 0 {
+			var inviter User
+			err := lockForUpdate(tx).Select("id").Where("id = ?", inviterId).First(&inviter).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				inviterId = 0
+			} else if err != nil {
+				return err
+			}
+		}
+		user.InviterId = inviterId
+		newUserRewardQuota := common.QuotaForNewUser
+		inviteeRewardQuota := 0
+		initialQuota := newUserRewardQuota
+		if inviterId > 0 && operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInvitee > 0 {
+			inviteeRewardQuota = common.QuotaForInvitee
+			if initialQuota < 0 || inviteeRewardQuota >= common.MaxQuota || initialQuota > common.MaxQuota-1-inviteeRewardQuota {
+				return errors.New("initial user quota exceeds supported range")
+			}
+			initialQuota += inviteeRewardQuota
+		}
+		if initialQuota < 0 || initialQuota >= common.MaxQuota {
+			return errors.New("initial user quota exceeds supported range")
+		}
+		user.Quota = initialQuota
 		var err error
 		user.AffCode, err = generateUniqueAffCode(tx)
 		if err != nil {
@@ -778,7 +943,60 @@ func (user *User) InsertWithTx(tx *gorm.DB, inviterId int) error {
 			user.SetSetting(defaultSetting)
 		}
 
-		return tx.Create(user).Error
+		if err := tx.Create(user).Error; err != nil {
+			return err
+		}
+		if newUserRewardQuota > 0 {
+			balanceAfter := int64(newUserRewardQuota)
+			sourceKey := fmt.Sprintf("%s:%d", promotionFundSourceUserRegistration, user.Id)
+			if err := CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+				TransactionKey: fmt.Sprintf("user_registration:%d:new_user_reward", user.Id),
+				Kind:           promotionFundKindNewUserRegistrationRewardIssued,
+				UserId:         user.Id,
+				SourceType:     promotionFundSourceUserRegistration,
+				SourceId:       user.Id,
+				SourceKey:      sourceKey,
+				ActorType:      "system",
+				OccurredAt:     user.CreatedAt,
+			}, []PromotionFundTransactionLeg{{
+				Account:      PromotionFundAccountAPIBalance,
+				Asset:        PromotionFundAssetQuota,
+				Amount:       int64(newUserRewardQuota),
+				SourceType:   promotionFundSourceUserRegistration,
+				SourceId:     user.Id,
+				BalanceAfter: &balanceAfter,
+			}}); err != nil {
+				return err
+			}
+		}
+		if inviteeRewardQuota > 0 {
+			balanceAfter := int64(initialQuota)
+			sourceKey := fmt.Sprintf("%s:%d", promotionFundSourceInvitationRegistration, user.Id)
+			if err := CreatePromotionFundTransactionTx(tx, &PromotionFundTransaction{
+				TransactionKey: fmt.Sprintf("user_registration:%d:invitee_reward", user.Id),
+				Kind:           promotionFundKindInviteeRegistrationRewardIssued,
+				UserId:         user.Id,
+				SourceType:     promotionFundSourceInvitationRegistration,
+				SourceId:       user.Id,
+				SourceKey:      sourceKey,
+				ActorType:      "system",
+				OccurredAt:     user.CreatedAt,
+			}, []PromotionFundTransactionLeg{{
+				Account:      PromotionFundAccountAPIBalance,
+				Asset:        PromotionFundAssetQuota,
+				Amount:       int64(inviteeRewardQuota),
+				SourceType:   promotionFundSourceInvitationRegistration,
+				SourceId:     user.Id,
+				BalanceAfter: &balanceAfter,
+			}}); err != nil {
+				return err
+			}
+		}
+		if inviterId > 0 {
+			_, err = CreateInvitationRegisterRewardTx(tx, inviterId, user.Id)
+			return err
+		}
+		return nil
 	})
 }
 
@@ -801,12 +1019,15 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 	if common.QuotaForNewUser > 0 {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", logger.LogQuota(common.QuotaForNewUser)))
 	}
-	if inviterId != 0 {
+	if user.InviterId != 0 {
 		if operation_setting.IsPaymentComplianceConfirmed() && common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
-		_ = inviteUser(inviterId, user.Id)
+		_ = InvalidateUserCache(user.InviterId)
+		var reward InvitationReward
+		if err := DB.Where("invitee_id = ? AND reward_type = ?", user.Id, InvitationRewardTypeRegister).First(&reward).Error; err == nil && reward.RewardQuota > 0 {
+			RecordLog(user.InviterId, LogTypeSystem, fmt.Sprintf("邀请用户赠送 %s", logger.LogQuota(reward.RewardQuota)))
+		}
 	}
 }
 
@@ -859,6 +1080,8 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 	if err = tx.Model(&current).Omit(
 		"access_token",
 		"quota",
+		"refund_debt_quota",
+		"refund_hold",
 		"used_quota",
 		"request_count",
 		"aff_count",
@@ -973,6 +1196,9 @@ func (user *User) Delete() error {
 	}
 	var nextAuthVersion int64
 	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockUserRefundRecoveryForDeletionTx(tx, user); err != nil {
+			return err
+		}
 		var err error
 		nextAuthVersion, err = IncrementUserAuthVersionWithTx(tx, user.Id)
 		if err != nil {
@@ -998,6 +1224,12 @@ func (user *User) HardDelete() error {
 	var tokens []Token
 	var deletedAuthVersion int64
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockUserRefundRecoveryForDeletionTx(tx, user); err != nil {
+			return err
+		}
+		if err := ensureUserFinancialHistoryPreservedTx(tx, user.Id); err != nil {
+			return err
+		}
 		var err error
 		deletedAuthVersion, err = IncrementUserAuthVersionWithTx(tx, user.Id)
 		if err != nil {
@@ -1024,6 +1256,105 @@ func (user *User) HardDelete() error {
 	}
 	if err := invalidateUserCache(user.Id); err != nil {
 		common.SysError(fmt.Sprintf("failed to invalidate user cache after hard deleting user %d: %v", user.Id, err))
+	}
+	return nil
+}
+
+// ensureUserFinancialHistoryPreservedTx keeps the evidence required to bind a
+// late provider refund and recover every payment or promotion benefit. Soft
+// deletion is compatible with that workflow because refund accounting uses
+// Unscoped user locks; permanent deletion is deliberately fail-closed.
+func ensureUserFinancialHistoryPreservedTx(tx *gorm.DB, userId int) error {
+	if tx == nil || userId <= 0 {
+		return errors.New("invalid user financial history check")
+	}
+	checks := []struct {
+		model any
+		query string
+		args  []any
+	}{
+		{model: &TopUp{}, query: "user_id = ?", args: []any{userId}},
+		{model: &Redemption{}, query: "used_user_id = ?", args: []any{userId}},
+		{model: &SubscriptionOrder{}, query: "user_id = ?", args: []any{userId}},
+		{model: &UserSubscription{}, query: "user_id = ?", args: []any{userId}},
+		{model: &InvitationRebate{}, query: "inviter_id = ? OR invitee_id = ?", args: []any{userId, userId}},
+		{model: &InvitationReward{}, query: "inviter_id = ? OR invitee_id = ?", args: []any{userId, userId}},
+		{model: &GrowthReward{}, query: "user_id = ?", args: []any{userId}},
+		{model: &GrowthSubmission{}, query: "user_id = ? OR reviewer_id = ?", args: []any{userId, userId}},
+		{model: &Checkin{}, query: "user_id = ?", args: []any{userId}},
+		{model: &PromotionCommissionLedger{}, query: "user_id = ? OR invitee_id = ?", args: []any{userId, userId}},
+		{model: &PromotionWithdrawal{}, query: "user_id = ? OR reviewer_id = ?", args: []any{userId, userId}},
+		{model: &PromotionWithdrawalOperation{}, query: "actor_type = ? AND actor_id = ?", args: []any{PromotionWithdrawalActorAdmin, userId}},
+		{model: &PromotionFundTransaction{}, query: "user_id = ? OR actor_id = ?", args: []any{userId, userId}},
+		{model: &PromotionEvent{}, query: "user_id = ?", args: []any{userId}},
+		{model: &PromotionRefundCase{}, query: "user_id = ? OR initiator_id = ? OR reviewer_id = ?", args: []any{userId, userId, userId}},
+		{model: &PromotionRefundCaseUser{}, query: "user_id = ?", args: []any{userId}},
+		{model: &PromotionRefundObligation{}, query: "user_id = ?", args: []any{userId}},
+		{model: &PromotionRefundAction{}, query: "user_id = ? OR actor_id = ?", args: []any{userId, userId}},
+		{model: &SubscriptionAdminOperation{}, query: "target_user_id = ? OR actor_id = ?", args: []any{userId, userId}},
+		{model: &SubscriptionAdminOperationItem{}, query: "user_id = ?", args: []any{userId}},
+	}
+	for _, check := range checks {
+		var count int64
+		if err := tx.Unscoped().Model(check.model).Where(check.query, check.args...).Limit(1).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return ErrUserFinancialHistory
+		}
+	}
+	return nil
+}
+
+// lockUserRefundRecoveryForDeletionTx serializes deletion with refund
+// assessment and recovery. A user remains addressable until every durable
+// hold, debt, obligation, and pending responsibility has been cleared.
+func lockUserRefundRecoveryForDeletionTx(tx *gorm.DB, user *User) error {
+	if tx == nil || user == nil || user.Id <= 0 {
+		return errors.New("invalid user deletion")
+	}
+	var locked User
+	if err := lockForUpdate(tx.Unscoped()).
+		Select("id", "refund_hold", "refund_debt_quota").
+		Where("id = ?", user.Id).First(&locked).Error; err != nil {
+		return err
+	}
+	if locked.RefundHold || locked.RefundDebtQuota != 0 {
+		return ErrUserRefundRecoveryPending
+	}
+
+	var openObligations int64
+	if err := tx.Model(&PromotionRefundObligation{}).
+		Where("user_id = ? AND status = ?", user.Id, PromotionRefundObligationStatusOpen).
+		Count(&openObligations).Error; err != nil {
+		return err
+	}
+	if openObligations != 0 {
+		return ErrUserRefundRecoveryPending
+	}
+
+	topUpIds := tx.Model(&TopUp{}).Select("id").Where("user_id = ?", user.Id)
+	topUpTrades := tx.Model(&TopUp{}).Select("trade_no").Where("user_id = ?", user.Id)
+	rebateIds := tx.Model(&InvitationRebate{}).Select("id").Where("inviter_id = ?", user.Id)
+	commissionLedgerIds := tx.Model(&PromotionCommissionLedger{}).Select("id").Where("user_id = ?", user.Id)
+	obligationCaseIds := tx.Model(&PromotionRefundObligation{}).Select("refund_case_id").Where("user_id = ?", user.Id)
+	responsibilityCaseIds := tx.Model(&PromotionRefundCaseUser{}).Select("refund_case_id").Where("user_id = ?", user.Id)
+	rewardTopUpIds := tx.Model(&InvitationReward{}).Select("trigger_top_up_id").
+		Where("inviter_id = ? AND trigger_top_up_id > 0 AND status = ?", user.Id, InvitationRewardStatusSettled)
+	rewardTradeNos := tx.Model(&InvitationReward{}).Select("trigger_trade_no").
+		Where("inviter_id = ? AND trigger_trade_no <> ? AND status = ?", user.Id, "", InvitationRewardStatusSettled)
+
+	var pendingCases int64
+	if err := tx.Model(&PromotionRefundCase{}).
+		Where("status = ? OR (status = ? AND quota_amount = 0 AND wallet_debited_quota = 0 AND debt_created_quota = 0 AND cash_debt_created_minor = 0)",
+			PromotionRefundCaseStatusPendingReview, PromotionRefundCaseStatusResolved).
+		Where("user_id = ? OR top_up_id IN (?) OR trade_no IN (?) OR invitation_rebate_id IN (?) OR commission_ledger_id IN (?) OR id IN (?) OR id IN (?) OR top_up_id IN (?) OR trade_no IN (?)",
+			user.Id, topUpIds, topUpTrades, rebateIds, commissionLedgerIds, obligationCaseIds, responsibilityCaseIds, rewardTopUpIds, rewardTradeNos).
+		Count(&pendingCases).Error; err != nil {
+		return err
+	}
+	if pendingCases != 0 {
+		return ErrUserRefundRecoveryPending
 	}
 	return nil
 }
@@ -1331,21 +1662,21 @@ func GetUserSetting(id int, fromDB bool) (settingMap dto.UserSetting, err error)
 	return userBase.GetSetting(), nil
 }
 
+// IncreaseUserQuota always persists the wallet change synchronously. The db
+// parameter is retained for caller compatibility; wallet balances no longer
+// participate in the process-local batch updater.
 func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	gopool.Go(func() {
-		err := cacheIncrUserQuota(id, int64(quota))
-		if err != nil {
-			common.SysLog("failed to increase user quota: " + err.Error())
-		}
-	})
-	if !db && common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
+	if quota == 0 {
 		return nil
 	}
-	return increaseUserQuota(id, quota)
+	if err := increaseUserQuota(id, quota); err != nil {
+		return err
+	}
+	invalidateUserQuotaCacheAfterDBWrite(id, "quota credit")
+	return nil
 }
 
 func increaseUserQuota(id int, quota int) (err error) {
@@ -1356,29 +1687,69 @@ func increaseUserQuota(id int, quota int) (err error) {
 	return err
 }
 
+// DecreaseUserQuota follows the same synchronous wallet invariant as credits.
 func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
-	gopool.Go(func() {
-		err := cacheDecrUserQuota(id, int64(quota))
-		if err != nil {
-			common.SysLog("failed to decrease user quota: " + err.Error())
-		}
-	})
-	if !db && common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
+	if quota == 0 {
 		return nil
 	}
-	return decreaseUserQuota(id, quota)
+	if err := decreaseUserQuota(id, quota); err != nil {
+		return err
+	}
+	invalidateUserQuotaCacheAfterDBWrite(id, "quota debit")
+	return nil
 }
 
 func decreaseUserQuota(id int, quota int) (err error) {
-	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota - ?", quota)).Error
-	if err != nil {
+	result := DB.Model(&User{}).
+		Where("id = ? AND (refund_hold = ? OR refund_hold IS NULL)", id, false).
+		Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	var heldCount int64
+	if err := DB.Model(&User{}).Where("id = ? AND refund_hold = ?", id, true).Count(&heldCount).Error; err != nil {
 		return err
 	}
-	return err
+	if heldCount != 0 {
+		return ErrUserRefundHeld
+	}
+	var userCount int64
+	if err := DB.Model(&User{}).Where("id = ?", id).Count(&userCount).Error; err != nil {
+		return err
+	}
+	if userCount == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// SettleAuthorizedUserQuota charges work that crossed the refund-hold gate
+// before the hold was installed. New reservations and all other outflows must
+// use TryReserveUserQuota or DecreaseUserQuota so a held account cannot start
+// new spending. Final settlement may take the wallet negative, preserving the
+// existing arrears semantics instead of leaving already-delivered usage unpaid.
+func SettleAuthorizedUserQuota(id int, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	result := DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrRecordNotFound
+	}
+	invalidateUserQuotaCacheAfterDBWrite(id, "authorized quota settlement")
+	return nil
 }
 
 func DeltaUpdateUserQuota(id int, delta int) (err error) {
@@ -1409,41 +1780,42 @@ func UpdateUserLastLoginAt(id int) {
 }
 
 func UpdateUserUsedQuotaAndRequestCount(id int, quota int) {
-	wasFirstRequest := shouldSettleInvitationFirstRequestReward(id)
+	var pendingReward *InvitationReward
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		pendingReward, err = QueueInvitationFirstRequestRewardTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if common.BatchUpdateEnabled {
+			return nil
+		}
+		result := tx.Model(&User{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"used_quota":    gorm.Expr("used_quota + ?", quota),
+			"request_count": gorm.Expr("request_count + 1"),
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		common.SysLog("failed to queue first-request reward before recording request: " + err.Error())
+		// Preserve usage accounting, but do not advance request_count without the
+		// durable first-request trigger. A later successful request can retry it.
+		UpdateUserUsedQuota(id, quota)
+		return
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUsedQuota, id, quota)
 		addNewRecord(BatchUpdateTypeRequestCount, id, 1)
-		if wasFirstRequest {
-			gopool.Go(func() {
-				SettleInvitationFirstRequestReward(id)
-			})
-		}
-		return
 	}
-	updateUserUsedQuotaAndRequestCount(id, quota, 1)
-	if wasFirstRequest {
-		gopool.Go(func() {
-			SettleInvitationFirstRequestReward(id)
-		})
+	if pendingReward != nil && pendingReward.Status == InvitationRewardStatusPending {
+		SettleInvitationFirstRequestReward(id)
 	}
-}
-
-func shouldSettleInvitationFirstRequestReward(id int) bool {
-	if id <= 0 {
-		return false
-	}
-	if !operation_setting.IsPaymentComplianceConfirmed() {
-		return false
-	}
-	if operation_setting.GetGrowthSetting().InviteFirstRequestRewardQuota <= 0 {
-		return false
-	}
-	var user User
-	err := DB.Select("id", "inviter_id", "request_count").Where("id = ?", id).First(&user).Error
-	if err != nil {
-		return false
-	}
-	return user.InviterId > 0 && user.RequestCount == 0
 }
 
 // UpdateUserUsedQuota adjusts accumulated usage without changing request count.
@@ -1475,21 +1847,25 @@ func updateUserUsedQuotaAndRequestCount(id int, quota int, count int) {
 	//}
 }
 
-func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) {
+func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) error {
 	if quota == 0 && usedQuota == 0 && requestCount == 0 {
-		return
+		return nil
 	}
 
-	err := DB.Model(&User{}).Where("id = ?", id).Updates(
+	result := DB.Model(&User{}).Where("id = ?", id).Updates(
 		map[string]interface{}{
 			"quota":         gorm.Expr("quota + ?", quota),
 			"used_quota":    gorm.Expr("used_quota + ?", usedQuota),
 			"request_count": gorm.Expr("request_count + ?", requestCount),
 		},
-	).Error
-	if err != nil {
-		common.SysLog("failed to batch update user quota, used quota and request count: " + err.Error())
+	)
+	if result.Error != nil {
+		return result.Error
 	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // GetUsernameById gets username from Redis first, falls back to DB if needed

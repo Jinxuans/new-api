@@ -117,7 +117,7 @@ func GetDefaultGrowthRewardItems() []*GrowthRewardItem {
 			Title:       "Join the community",
 			Description: "Join the community and enter the task password to claim the reward.",
 			ItemType:    GrowthRewardItemTypeAuto,
-			Enabled:     true,
+			Enabled:     false,
 			OncePerUser: true,
 		},
 		{
@@ -152,9 +152,14 @@ func EnsureDefaultGrowthRewardItems() error {
 			return err
 		}
 	}
-	return DB.Model(&GrowthRewardItem{}).
+	if err := DB.Model(&GrowthRewardItem{}).
 		Where("code = ? AND item_type <> ?", GrowthRewardItemJoinCommunity, GrowthRewardItemTypeAuto).
-		Update("item_type", GrowthRewardItemTypeAuto).Error
+		Update("item_type", GrowthRewardItemTypeAuto).Error; err != nil {
+		return err
+	}
+	return DB.Model(&GrowthRewardItem{}).
+		Where("code = ? AND enabled = ? AND (claim_password IS NULL OR claim_password = ?)", GrowthRewardItemJoinCommunity, true, "").
+		Update("enabled", false).Error
 }
 
 func migrateGrowthRewardTables() error {

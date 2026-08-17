@@ -8,7 +8,6 @@ import (
 )
 
 type UserInvitationRecord struct {
-	UserID                      int     `json:"user_id"`
 	Username                    string  `json:"username"`
 	DisplayName                 string  `json:"display_name"`
 	CreatedAt                   int64   `json:"created_at"`
@@ -161,7 +160,6 @@ func GetUserInvitationRecords(inviterId int, pageInfo *common.PageInfo) (
 		firstRequestRewardQuota := milestoneRewards[InvitationRewardTypeFirstRequest]
 		firstTopUpRewardQuota := milestoneRewards[InvitationRewardTypeFirstTopUp]
 		records = append(records, &UserInvitationRecord{
-			UserID:                      row.UserID,
 			Username:                    row.Username,
 			DisplayName:                 row.DisplayName,
 			CreatedAt:                   row.CreatedAt,

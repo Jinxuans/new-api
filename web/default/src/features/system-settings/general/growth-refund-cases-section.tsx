@@ -16,23 +16,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { CheckCircle2, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Clock01Icon, ShieldUserIcon } from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { Accordion } from '@/components/ui/accordion'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty'
 import {
   Select,
   SelectContent,
@@ -41,66 +41,62 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { Textarea } from '@/components/ui/textarea'
+import { Skeleton } from '@/components/ui/skeleton'
 import { api } from '@/lib/api'
+import { createIdempotencyKey } from '@/lib/idempotency'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { SettingsSection } from '../components/settings-section'
+import {
+  GrowthRefundActionDialog,
+  type RefundActionRequest,
+} from './growth-refund-action-dialog'
+import { GrowthRefundCaseCard } from './growth-refund-case-card'
+import { GrowthRefundCreateDialog } from './growth-refund-create-dialog'
+import { GrowthRefundObligationDialog } from './growth-refund-obligation-dialog'
+import type {
+  PromotionRefundCase,
+  PromotionRefundObligation,
+  RefundActionIntent,
+  RefundRecoveryAction,
+} from './growth-refund-types'
 
 type RefundCaseStatusFilter = 'pending_review' | 'resolved' | 'all'
 
-type PromotionRefundCase = {
-  id: number
-  provider: string
-  trade_no: string
-  refund_trade_no: string
-  kind: 'full_refund' | 'partial_refund' | 'dispute'
-  paid_amount_minor: number
-  refunded_amount_minor: number
-  currency: string
-  status: 'pending_review' | 'resolved'
-  reason: string
-  review_note?: string
-  reviewer_id?: number
-  created_at: number
-  resolved_at?: number
-}
-
 const PAGE_SIZE = 20
-const MAX_REVIEW_NOTE_LENGTH = 1000
 
-function formatMinorAmount(amountMinor: number, currency: string) {
-  const normalizedCurrency = (currency || '').trim().toUpperCase() || 'CNY'
-  const safeAmountMinor = Number.isFinite(amountMinor) ? amountMinor : 0
-  try {
-    const formatter = new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: normalizedCurrency,
-    })
-    const fractionDigits =
-      formatter.resolvedOptions().maximumFractionDigits ?? 2
-    return formatter.format(safeAmountMinor / 10 ** fractionDigits)
-  } catch {
-    return `${normalizedCurrency} ${(safeAmountMinor / 100).toFixed(2)}`
+function getRefundCasePage(payload: unknown) {
+  const response = payload as {
+    data?: {
+      total?: number
+      items?: PromotionRefundCase[]
+    }
+  }
+  return {
+    total: Number(response.data?.total || 0),
+    items: (response.data?.items || []).map((refundCase) => ({
+      ...refundCase,
+      obligations: refundCase.obligations || [],
+      actions: refundCase.actions || [],
+    })),
   }
 }
 
-function getRefundCaseItems(payload: unknown): PromotionRefundCase[] {
-  const response = payload as {
-    data?: { items?: PromotionRefundCase[] }
-  }
-  return response.data?.items || []
+function createActionKey(
+  refundCase: PromotionRefundCase,
+  action: RefundRecoveryAction,
+  obligation?: PromotionRefundObligation
+) {
+  const prefix = `refund-${refundCase.id}-${obligation?.id || 0}-${action}`
+  return createIdempotencyKey(prefix)
 }
 
 export function GrowthRefundCasesSection() {
   const { t } = useTranslation()
+  const canUseRootActions = useAuthStore(
+    (state) => state.auth.user?.role === ROLE.SUPER_ADMIN
+  )
   const [refundCases, setRefundCases] = useState<PromotionRefundCase[]>([])
   const [statusFilter, setStatusFilter] =
     useState<RefundCaseStatusFilter>('pending_review')
@@ -108,22 +104,17 @@ export function GrowthRefundCasesSection() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
-  const [resolvingId, setResolvingId] = useState<number | null>(null)
-  const [reviewNoteById, setReviewNoteById] = useState<Record<number, string>>(
-    {}
-  )
-  const [confirmation, setConfirmation] = useState<PromotionRefundCase | null>(
+  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [actionIntent, setActionIntent] = useState<RefundActionIntent | null>(
     null
   )
+  const [submitting, setSubmitting] = useState(false)
   const loadRequestIdRef = useRef(0)
-
-  const totalPages = useMemo(
-    () => Math.max(1, Math.ceil(total / PAGE_SIZE)),
-    [total]
-  )
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   const loadRefundCases = useCallback(async () => {
     const requestId = ++loadRequestIdRef.current
+    setActionIntent(null)
     setLoading(true)
     setLoadError('')
     try {
@@ -134,8 +125,9 @@ export function GrowthRefundCasesSection() {
       if (!response.data?.success) {
         throw new Error(response.data?.message || 'Failed to load refund cases')
       }
-      setRefundCases(getRefundCaseItems(response.data))
-      setTotal(Number(response.data?.data?.total || 0))
+      const refundCasePage = getRefundCasePage(response.data)
+      setRefundCases(refundCasePage.items)
+      setTotal(refundCasePage.total)
     } catch {
       if (requestId !== loadRequestIdRef.current) return
       setRefundCases([])
@@ -152,94 +144,184 @@ export function GrowthRefundCasesSection() {
     void loadRefundCases()
   }, [loadRefundCases])
 
-  const requestResolve = (refundCase: PromotionRefundCase) => {
-    const reviewNote = reviewNoteById[refundCase.id]?.trim() || ''
-    if (!reviewNote) {
-      toast.error(t('Review note is required'))
+  const openAction = (
+    refundCase: PromotionRefundCase,
+    action: RefundRecoveryAction,
+    obligation?: PromotionRefundObligation
+  ) => {
+    if (loading || submitting) return
+    if (
+      !canUseRootActions &&
+      (action === 'define_manual_obligation' ||
+        action === 'quarantine_unknown_commission' ||
+        action === 'revoke_subscription_entitlement' ||
+        action === 'waive')
+    ) {
       return
     }
-    if ([...reviewNote].length > MAX_REVIEW_NOTE_LENGTH) {
-      toast.error(t('Review note cannot exceed 1000 characters'))
-      return
-    }
-    setConfirmation(refundCase)
+    setActionIntent({
+      refundCase,
+      action,
+      obligation,
+      idempotencyKey: createActionKey(refundCase, action, obligation),
+    })
   }
 
-  const resolveRefundCase = async () => {
-    if (!confirmation) return
-    const reviewNote = reviewNoteById[confirmation.id]?.trim()
-    if (!reviewNote) return
-
+  const submitAction = async (request: RefundActionRequest) => {
+    if (!actionIntent) return
     try {
-      setResolvingId(confirmation.id)
+      setSubmitting(true)
       const response = await api.post(
-        `/api/growth/admin/refund-cases/${confirmation.id}/resolve`,
-        { review_note: reviewNote }
+        `/api/growth/admin/refund-cases/${actionIntent.refundCase.id}/actions`,
+        request
       )
       if (!response.data?.success) {
         throw new Error(
-          response.data?.message || t('Failed to resolve refund case')
+          response.data?.message || t('Failed to record recovery action')
         )
       }
-      toast.success(t('Refund case marked resolved'))
-      setConfirmation(null)
+      toast.success(t('Recovery action recorded'))
+      setActionIntent(null)
       await loadRefundCases()
     } catch (error) {
       toast.error(
         error instanceof Error && error.message
           ? error.message
-          : t('Failed to resolve refund case')
+          : t('Failed to record recovery action')
       )
     } finally {
-      setResolvingId(null)
+      setSubmitting(false)
     }
   }
 
-  const refundKindLabel = (kind: PromotionRefundCase['kind']) => {
-    switch (kind) {
-      case 'full_refund':
-        return t('Full refund')
-      case 'partial_refund':
-        return t('Partial refund')
-      case 'dispute':
-        return t('Dispute')
-    }
+  let content
+  if (loadError) {
+    content = null
+  } else if (loading && refundCases.length === 0) {
+    content = (
+      <div
+        className='flex flex-col gap-3'
+        role='status'
+        aria-label={t('Loading refund cases')}
+      >
+        {[0, 1, 2].map((skeletonId) => (
+          <div
+            key={skeletonId}
+            className='flex flex-col gap-3 rounded-lg border p-4'
+          >
+            <Skeleton className='h-5 w-56 max-w-full' />
+            <Skeleton className='h-4 w-80 max-w-full' />
+          </div>
+        ))}
+      </div>
+    )
+  } else if (refundCases.length === 0) {
+    content = (
+      <Empty className='border'>
+        <EmptyHeader>
+          <EmptyMedia variant='icon'>
+            <HugeiconsIcon
+              icon={Clock01Icon}
+              strokeWidth={2}
+              aria-hidden='true'
+            />
+          </EmptyMedia>
+          <EmptyTitle>{t('No refund recovery cases')}</EmptyTitle>
+          <EmptyDescription>
+            {statusFilter === 'pending_review'
+              ? t('No refunds currently require recovery action.')
+              : t('No refund cases match this status.')}
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  } else {
+    content = (
+      <Accordion className='rounded-lg border' aria-busy={loading}>
+        {refundCases.map((refundCase) => (
+          <GrowthRefundCaseCard
+            key={refundCase.id}
+            refundCase={refundCase}
+            busy={loading || submitting}
+            canUseRootActions={canUseRootActions}
+            onAction={openAction}
+          />
+        ))}
+      </Accordion>
+    )
+  }
+
+  let actionDialog = null
+  if (actionIntent?.action === 'define_manual_obligation') {
+    actionDialog = (
+      <GrowthRefundObligationDialog
+        key={actionIntent.idempotencyKey}
+        intent={actionIntent}
+        submitting={submitting}
+        onCancel={() => !submitting && setActionIntent(null)}
+        onSubmit={submitAction}
+      />
+    )
+  } else if (actionIntent) {
+    actionDialog = (
+      <GrowthRefundActionDialog
+        key={actionIntent.idempotencyKey}
+        intent={actionIntent}
+        submitting={submitting}
+        onCancel={() => !submitting && setActionIntent(null)}
+        onSubmit={submitAction}
+      />
+    )
   }
 
   return (
     <SettingsSection
-      title={t('Refund cases')}
+      title={t('Refund recovery')}
       description={t(
-        'Review refunds that require manual commission recovery or quota adjustment.'
+        'Recover refunded API balance and paid commission through explicit, auditable actions.'
       )}
     >
-      <div className='space-y-4 rounded-lg border p-4'>
+      <div className='flex flex-col gap-4 rounded-lg border p-4'>
         <Alert>
+          <HugeiconsIcon
+            icon={ShieldUserIcon}
+            strokeWidth={2}
+            aria-hidden='true'
+          />
+          <AlertTitle>{t('Recovery follows the money')}</AlertTitle>
           <AlertDescription>
             {t(
-              'Marking a case resolved only records the completed manual review. It does not change balances or commissions.'
+              'Each case shows the refunded principal, immediate wallet debit, remaining obligations, immutable action history, and the final hold release. A case cannot be closed by adding a note.'
             )}
           </AlertDescription>
         </Alert>
-        <div className='flex flex-wrap items-center justify-between gap-3'>
+
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
           <Badge variant={total > 0 ? 'secondary' : 'outline'}>
             {t('{{count}} results', { count: total })}
           </Badge>
-          <div className='flex items-center gap-2'>
+          <div className='flex flex-col gap-2 sm:flex-row'>
+            {canUseRootActions ? (
+              <Button type='button' onClick={() => setCreateDialogOpen(true)}>
+                {t('Create refund case')}
+              </Button>
+            ) : null}
             <Select
               items={[
-                { value: 'pending_review', label: t('Pending review') },
+                { value: 'pending_review', label: t('Recovery in progress') },
                 { value: 'resolved', label: t('Resolved') },
                 { value: 'all', label: t('All statuses') },
               ]}
               value={statusFilter}
               onValueChange={(value) => {
+                setActionIntent(null)
+                setLoading(true)
                 setPage(1)
                 setStatusFilter(value as RefundCaseStatusFilter)
               }}
             >
               <SelectTrigger
-                className='w-44'
+                className='w-full sm:w-48'
                 aria-label={t('Refund case status')}
               >
                 <SelectValue />
@@ -247,7 +329,7 @@ export function GrowthRefundCasesSection() {
               <SelectContent alignItemWithTrigger={false}>
                 <SelectGroup>
                   <SelectItem value='pending_review'>
-                    {t('Pending review')}
+                    {t('Recovery in progress')}
                   </SelectItem>
                   <SelectItem value='resolved'>{t('Resolved')}</SelectItem>
                   <SelectItem value='all'>{t('All statuses')}</SelectItem>
@@ -257,18 +339,17 @@ export function GrowthRefundCasesSection() {
             <Button
               type='button'
               variant='outline'
-              size='sm'
               onClick={() => void loadRefundCases()}
               disabled={loading}
             >
-              <RefreshCw className='size-4' />
-              {t('Refresh')}
+              {t('Refresh cases')}
             </Button>
           </div>
         </div>
 
         {loadError ? (
           <Alert variant='destructive'>
+            <AlertTitle>{t('Refund cases could not be loaded')}</AlertTitle>
             <AlertDescription className='flex flex-wrap items-center justify-between gap-3'>
               <span>{loadError}</span>
               <Button
@@ -283,143 +364,22 @@ export function GrowthRefundCasesSection() {
           </Alert>
         ) : null}
 
-        <div className='overflow-x-auto'>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t('Order')}</TableHead>
-                <TableHead>{t('Refund')}</TableHead>
-                <TableHead>{t('Amount')}</TableHead>
-                <TableHead>{t('Reason')}</TableHead>
-                <TableHead>{t('Review')}</TableHead>
-                <TableHead className='text-right'>{t('Actions')}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {refundCases.length > 0 ? (
-                refundCases.map((refundCase) => {
-                  const pending = refundCase.status === 'pending_review'
-                  return (
-                    <TableRow key={refundCase.id}>
-                      <TableCell className='min-w-56 whitespace-normal'>
-                        <div className='space-y-1 text-xs'>
-                          <div className='font-medium'>
-                            {refundCase.provider}
-                          </div>
-                          <div className='text-muted-foreground break-all'>
-                            {t('Order')}: {refundCase.trade_no}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className='min-w-56 whitespace-normal'>
-                        <div className='space-y-1 text-xs'>
-                          <div className='flex flex-wrap items-center gap-2'>
-                            <Badge variant='outline'>
-                              {refundKindLabel(refundCase.kind)}
-                            </Badge>
-                            <Badge variant={pending ? 'secondary' : 'default'}>
-                              {pending ? t('Pending review') : t('Resolved')}
-                            </Badge>
-                          </div>
-                          <div className='text-muted-foreground break-all'>
-                            {t('Refund order')}: {refundCase.refund_trade_no}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className='min-w-44 whitespace-normal'>
-                        <div className='space-y-1 text-xs'>
-                          <div className='font-medium'>
-                            {formatMinorAmount(
-                              refundCase.refunded_amount_minor,
-                              refundCase.currency
-                            )}
-                          </div>
-                          <div className='text-muted-foreground'>
-                            {t('Paid amount')}:{' '}
-                            {formatMinorAmount(
-                              refundCase.paid_amount_minor,
-                              refundCase.currency
-                            )}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className='min-w-64 text-xs whitespace-normal'>
-                        {refundCase.reason || '-'}
-                      </TableCell>
-                      <TableCell className='min-w-72 whitespace-normal'>
-                        {pending ? (
-                          <Textarea
-                            aria-label={t('Review note for refund {{id}}', {
-                              id: refundCase.id,
-                            })}
-                            value={reviewNoteById[refundCase.id] || ''}
-                            maxLength={MAX_REVIEW_NOTE_LENGTH}
-                            onChange={(event) =>
-                              setReviewNoteById((current) => ({
-                                ...current,
-                                [refundCase.id]: event.target.value,
-                              }))
-                            }
-                            placeholder={t(
-                              'Describe the manual recovery or quota adjustment completed.'
-                            )}
-                            className='min-h-16'
-                          />
-                        ) : (
-                          <div className='space-y-1 text-xs'>
-                            <div>{refundCase.review_note || '-'}</div>
-                            {refundCase.reviewer_id ? (
-                              <div className='text-muted-foreground'>
-                                {t('Reviewer ID')}: {refundCase.reviewer_id}
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell className='text-right'>
-                        {pending ? (
-                          <Button
-                            type='button'
-                            size='sm'
-                            onClick={() => requestResolve(refundCase)}
-                            disabled={resolvingId === refundCase.id}
-                          >
-                            <CheckCircle2 className='size-4' />
-                            {t('Mark resolved')}
-                          </Button>
-                        ) : (
-                          <span className='text-muted-foreground text-xs'>
-                            {t('Resolved')}
-                          </span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })
-              ) : (
-                <TableRow>
-                  <TableCell
-                    colSpan={6}
-                    className='text-muted-foreground py-10 text-center'
-                  >
-                    {loading ? t('Loading...') : t('No refund cases')}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </div>
+        {content}
 
-        <div className='flex flex-wrap items-center justify-between gap-3'>
-          <span className='text-muted-foreground text-xs'>
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
+          <span className='text-muted-foreground text-center text-xs sm:text-left'>
             {t('Page {{page}} of {{total}}', { page, total: totalPages })}
           </span>
-          <div className='flex gap-2'>
+          <div className='flex justify-center gap-2 sm:justify-end'>
             <Button
               type='button'
               variant='outline'
               size='sm'
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              onClick={() => {
+                setActionIntent(null)
+                setLoading(true)
+                setPage((current) => Math.max(1, current - 1))
+              }}
               disabled={loading || page <= 1}
             >
               {t('Previous')}
@@ -428,9 +388,11 @@ export function GrowthRefundCasesSection() {
               type='button'
               variant='outline'
               size='sm'
-              onClick={() =>
+              onClick={() => {
+                setActionIntent(null)
+                setLoading(true)
                 setPage((current) => Math.min(totalPages, current + 1))
-              }
+              }}
               disabled={loading || page >= totalPages}
             >
               {t('Next')}
@@ -439,49 +401,14 @@ export function GrowthRefundCasesSection() {
         </div>
       </div>
 
-      <AlertDialog
-        open={confirmation !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmation(null)
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {t('Mark this refund case resolved?')}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {t(
-                'Confirm only after the manual commission recovery or quota adjustment is complete. This action only closes the operational case.'
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className='rounded-lg border p-3 text-sm'>
-            <div>
-              {t('Order')}: {confirmation?.trade_no}
-            </div>
-            <div>
-              {t('Refunded amount')}:{' '}
-              {formatMinorAmount(
-                confirmation?.refunded_amount_minor || 0,
-                confirmation?.currency || 'CNY'
-              )}
-            </div>
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={resolvingId !== null}>
-              {t('Cancel')}
-            </AlertDialogCancel>
-            <Button
-              type='button'
-              onClick={() => void resolveRefundCase()}
-              disabled={resolvingId !== null}
-            >
-              {t('Confirm manual resolution')}
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {actionDialog}
+      {canUseRootActions ? (
+        <GrowthRefundCreateDialog
+          open={createDialogOpen}
+          onOpenChange={setCreateDialogOpen}
+          onCreated={loadRefundCases}
+        />
+      ) : null}
     </SettingsSection>
   )
 }

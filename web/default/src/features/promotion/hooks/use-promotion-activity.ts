@@ -28,7 +28,7 @@ import {
 const PAGE_SIZE = 10
 
 export function usePromotionActivity() {
-  const [filter, setFilterState] = useState<PromotionActivityFilter>('all')
+  const [filter, setFilterState] = useState<PromotionActivityFilter>('funds')
   const [page, setPage] = useState(1)
   const query = useQuery({
     queryKey: promotionQueryKeys.activity(filter, page, PAGE_SIZE),

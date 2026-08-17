@@ -635,3 +635,71 @@ export function formatLocalCurrencyAmount(
 
   return formatCurrencyValue(amount, merged, meta)
 }
+
+function getMinorAmountFractionDigits(currency: string): number {
+  const normalizedCurrency = currency.trim().toUpperCase() || 'CNY'
+  try {
+    const formatter = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: normalizedCurrency,
+      currencyDisplay: 'code',
+    })
+    return formatter.resolvedOptions().maximumFractionDigits ?? 2
+  } catch {
+    return 2
+  }
+}
+
+/** Return the number of minor units in one unit of an ISO currency. */
+export function getMinorAmountFactor(currency: string): number {
+  return 10 ** getMinorAmountFractionDigits(currency)
+}
+
+/** Parse an unsigned decimal amount without binary floating-point rounding. */
+export function parseMinorAmount(
+  value: string,
+  currency: string
+): number | null {
+  const match = /^(\d+)(?:\.(\d*))?$/.exec(value.trim())
+  if (!match) return null
+
+  const fractionDigits = getMinorAmountFractionDigits(currency)
+  const fraction = match[2] || ''
+  if (fraction.length > fractionDigits) return null
+
+  const factor = 10 ** fractionDigits
+  const whole = Number(match[1])
+  const minorFraction = fraction
+    ? Number(fraction.padEnd(fractionDigits, '0'))
+    : 0
+  if (!Number.isSafeInteger(whole) || !Number.isSafeInteger(minorFraction)) {
+    return null
+  }
+  if (whole > Math.floor((Number.MAX_SAFE_INTEGER - minorFraction) / factor)) {
+    return null
+  }
+
+  const amount = whole * factor + minorFraction
+  return Number.isSafeInteger(amount) ? amount : null
+}
+
+/** Format an integer amount expressed in the currency's minor unit. */
+export function formatMinorAmount(
+  amountMinor: number,
+  currency: string
+): string {
+  const normalizedCurrency = currency.trim().toUpperCase() || 'CNY'
+  const safeAmountMinor = Number.isFinite(amountMinor) ? amountMinor : 0
+  try {
+    const formatter = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: normalizedCurrency,
+      currencyDisplay: 'code',
+    })
+    return formatter.format(
+      safeAmountMinor / getMinorAmountFactor(normalizedCurrency)
+    )
+  } catch {
+    return `${normalizedCurrency} ${(safeAmountMinor / 100).toFixed(2)}`
+  }
+}

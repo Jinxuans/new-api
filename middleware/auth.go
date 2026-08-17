@@ -453,6 +453,10 @@ func TokenAuth() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
 			return
 		}
+		if userCache.RefundHold {
+			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthRefundHold), types.ErrorCodeAccessDenied)
+			return
+		}
 
 		userCache.WriteContext(c)
 

@@ -47,6 +47,7 @@ import {
   InputNumber,
   RadioGroup,
   Radio,
+  TextArea,
 } from '@douyinfe/semi-ui';
 import {
   IconUser,
@@ -68,6 +69,8 @@ const EditUserModal = (props) => {
   const [adjustQuotaLocal, setAdjustQuotaLocal] = useState('');
   const [adjustAmountLocal, setAdjustAmountLocal] = useState('');
   const [adjustMode, setAdjustMode] = useState('add');
+  const [adjustRemark, setAdjustRemark] = useState('');
+  const [adjustIdempotencyKey, setAdjustIdempotencyKey] = useState('');
   const [adjustLoading, setAdjustLoading] = useState(false);
   const isMobile = useIsMobile();
   const [groupOptions, setGroupOptions] = useState([]);
@@ -170,7 +173,24 @@ const EditUserModal = (props) => {
   const adjustQuota = async () => {
     const quotaVal = parseInt(adjustQuotaLocal) || 0;
     if (quotaVal <= 0 && adjustMode !== 'override') return;
-    if (adjustMode === 'override' && (adjustQuotaLocal === '' || adjustQuotaLocal == null)) return;
+    if (
+      adjustMode === 'override' &&
+      (adjustQuotaLocal === '' || adjustQuotaLocal == null)
+    )
+      return;
+    const remark = adjustRemark.trim();
+    if (!remark) {
+      showError(t('请输入备注（仅管理员可见）'));
+      return;
+    }
+    const idempotencyKey =
+      adjustIdempotencyKey ||
+      (typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `admin-quota-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    if (!adjustIdempotencyKey) {
+      setAdjustIdempotencyKey(idempotencyKey);
+    }
     setAdjustLoading(true);
     try {
       const res = await API.post('/api/user/manage', {
@@ -178,6 +198,8 @@ const EditUserModal = (props) => {
         action: 'add_quota',
         mode: adjustMode,
         value: adjustMode === 'override' ? quotaVal : Math.abs(quotaVal),
+        remark,
+        idempotency_key: idempotencyKey,
       });
       const { success, message } = res.data;
       if (success) {
@@ -185,6 +207,8 @@ const EditUserModal = (props) => {
         setAdjustModalOpen(false);
         setAdjustQuotaLocal('');
         setAdjustAmountLocal('');
+        setAdjustRemark('');
+        setAdjustIdempotencyKey('');
         const userRes = await API.get(`/api/user/${userId}`);
         if (userRes.data.success) {
           const data = userRes.data.data;
@@ -401,7 +425,10 @@ const EditUserModal = (props) => {
                             ? `▾ ${t('收起原生额度输入')}`
                             : `▸ ${t('使用原生额度输入')}`}
                         </div>
-                        <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                        <div
+                          style={{ display: showQuotaInput ? 'block' : 'none' }}
+                          className='mt-2'
+                        >
                           <Form.InputNumber
                             field='quota'
                             label={t('额度')}
@@ -470,6 +497,8 @@ const EditUserModal = (props) => {
           setAdjustQuotaLocal('');
           setAdjustAmountLocal('');
           setAdjustMode('add');
+          setAdjustRemark('');
+          setAdjustIdempotencyKey('');
         }}
         confirmLoading={adjustLoading}
         closable={null}
@@ -496,6 +525,7 @@ const EditUserModal = (props) => {
               setAdjustMode(e.target.value);
               setAdjustQuotaLocal('');
               setAdjustAmountLocal('');
+              setAdjustIdempotencyKey('');
             }}
             style={{ width: '100%' }}
           >
@@ -518,6 +548,7 @@ const EditUserModal = (props) => {
             onChange={(val) => {
               const amount = val === '' || val == null ? '' : val;
               setAdjustAmountLocal(amount);
+              setAdjustIdempotencyKey('');
               setAdjustQuotaLocal(
                 amount === ''
                   ? ''
@@ -539,7 +570,10 @@ const EditUserModal = (props) => {
             ? `▾ ${t('收起原生额度输入')}`
             : `▸ ${t('使用原生额度输入')}`}
         </div>
-        <div style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }} className='mt-2'>
+        <div
+          style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }}
+          className='mt-2'
+        >
           <div className='mb-1'>
             <Text size='small'>{t('额度')}</Text>
           </div>
@@ -550,6 +584,7 @@ const EditUserModal = (props) => {
             onChange={(val) => {
               const quota = val === '' || val == null ? '' : val;
               setAdjustQuotaLocal(quota);
+              setAdjustIdempotencyKey('');
               setAdjustAmountLocal(
                 quota === ''
                   ? ''
@@ -561,6 +596,21 @@ const EditUserModal = (props) => {
             style={{ width: '100%' }}
             showClear
             step={500000}
+          />
+        </div>
+        <div className='mt-3'>
+          <div className='mb-1'>
+            <Text size='small'>{t('备注')} *</Text>
+          </div>
+          <TextArea
+            value={adjustRemark}
+            maxCount={1000}
+            autosize={{ minRows: 2, maxRows: 5 }}
+            placeholder={t('请输入备注（仅管理员可见）')}
+            onChange={(value) => {
+              setAdjustRemark(value);
+              setAdjustIdempotencyKey('');
+            }}
           />
         </div>
       </Modal>

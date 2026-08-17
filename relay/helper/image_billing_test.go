@@ -66,8 +66,11 @@ func TestApplyImageBillingUsesConfiguredResolutionQualityAndCount(t *testing.T) 
 		OriginModelName: "image-test",
 		RelayMode:       relayconstant.RelayModeImagesGenerations,
 		PriceData: types.PriceData{
-			UsePrice:          true,
-			QuotaToPreConsume: 1000,
+			UsePrice:   true,
+			ModelPrice: 1000 / common.QuotaPerUnit,
+			GroupRatioInfo: types.GroupRatioInfo{
+				GroupRatio: 1,
+			},
 		},
 	}
 	c := testImageBillingContext(`{"model":"image-test","prompt":"draw","n":2,"size":"2048x1152","quality":"high"}`)
@@ -97,8 +100,11 @@ func TestApplyImageBillingWithoutConfiguredRuleDoesNotTierSizeOrQuality(t *testi
 		OriginModelName: "plain-image-test",
 		RelayMode:       relayconstant.RelayModeImagesGenerations,
 		PriceData: types.PriceData{
-			UsePrice:          true,
-			QuotaToPreConsume: 1000,
+			UsePrice:   true,
+			ModelPrice: 1000 / common.QuotaPerUnit,
+			GroupRatioInfo: types.GroupRatioInfo{
+				GroupRatio: 1,
+			},
 		},
 	}
 	c := testImageBillingContext(`{"model":"plain-image-test","prompt":"draw","n":1,"size":"4096x4096","quality":"high"}`)
@@ -132,8 +138,11 @@ func TestApplyImageBillingUsesConfiguredRuleForGeminiNativeImageModel(t *testing
 		OriginModelName: "gemini-3-pro-image-preview",
 		RelayMode:       relayconstant.RelayModeGemini,
 		PriceData: types.PriceData{
-			UsePrice:          true,
-			QuotaToPreConsume: 1000,
+			UsePrice:   true,
+			ModelPrice: 1000 / common.QuotaPerUnit,
+			GroupRatioInfo: types.GroupRatioInfo{
+				GroupRatio: 1,
+			},
 		},
 	}
 	c := testImageBillingContext(`{

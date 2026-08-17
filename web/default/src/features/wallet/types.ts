@@ -249,6 +249,10 @@ export interface UserWalletData {
  */
 export type TopupStatus = 'success' | 'pending' | 'expired'
 
+export type TopupPurpose = 'api_balance' | 'subscription'
+
+export type TopupRefundStatus = 'partial' | 'full' | 'disputed'
+
 /**
  * Topup billing record
  */
@@ -261,6 +265,24 @@ export interface TopupRecord {
   amount: number
   /** Payment amount (actual money paid) */
   money: number
+  /** Authoritative purpose recorded by the backend */
+  purpose?: TopupPurpose | string
+  /** Exact quota credited to the user's API balance */
+  credited_quota?: number
+  /** Provider-confirmed payment amount in the currency's minor unit */
+  paid_amount_minor?: number
+  /** ISO currency code for the provider-confirmed payment */
+  paid_currency?: string
+  /** Whether the payment snapshot was verified by the provider */
+  paid_amount_verified?: boolean
+  /** Refund state applied to this payment */
+  refund_status?: TopupRefundStatus | ''
+  /** Refunded payment amount in the original currency's minor unit */
+  refunded_amount_minor?: number
+  /** Quota removed because of the refund */
+  refunded_quota?: number
+  /** Refund timestamp */
+  refunded_at?: number
   /** Trade/order number */
   trade_no: string
   /** Payment method type */
@@ -286,4 +308,5 @@ export interface BillingHistoryResponse {
  */
 export interface CompleteOrderRequest {
   trade_no: string
+  reason: string
 }

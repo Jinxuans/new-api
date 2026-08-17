@@ -54,7 +54,7 @@ describe('promotion section isolation', () => {
       if (url === '/api/user/aff') {
         return { data: { success: true, data: 'CODE' } }
       }
-      if (url === '/api/growth/events') {
+      if (url === '/api/growth/fund-records') {
         return {
           data: {
             success: true,
@@ -64,10 +64,15 @@ describe('promotion section isolation', () => {
               total: 1,
               items: [
                 {
-                  id: 1,
-                  event_type: 'custom_event',
-                  direction: 'income',
-                  title: 'Independent activity',
+                  kind: 'growth_reward_issued',
+                  source: 'growth_reward',
+                  legs: [
+                    {
+                      account: 'referral_credit',
+                      asset: 'quota',
+                      amount: 5_000,
+                    },
+                  ],
                 },
               ],
             },
@@ -96,7 +101,7 @@ describe('promotion section isolation', () => {
       await screen.findByText('This section could not be loaded')
     ).toBeInTheDocument()
     expect(await screen.findByLabelText('Referral code')).toHaveValue('CODE')
-    expect(await screen.findByText('Independent activity')).toBeInTheDocument()
+    expect(await screen.findByText('Task reward added')).toBeInTheDocument()
     const guideTrigger = screen.getByRole('button', {
       name: 'Show promotion guide',
     })

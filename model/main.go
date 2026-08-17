@@ -72,7 +72,9 @@ func createRootAccountIfNeed() error {
 			AccessToken: nil,
 			Quota:       100000000,
 		}
-		DB.Create(&rootUser)
+		if err := CreateInitialRootUser(&rootUser); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -260,6 +262,9 @@ func migrateDB() error {
 	if err := migrateGrowthRewardTables(); err != nil {
 		return err
 	}
+	if err := migrateSubscriptionOrderUserSubscriptionLinkSQLite(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -278,10 +283,19 @@ func migrateDB() error {
 		&InvitationRebate{},
 		&InvitationReward{},
 		&PromotionEvent{},
+		&PromotionFundTransaction{},
+		&PromotionFundTransactionLeg{},
+		&PromotionFundBackfillCheckpoint{},
 		&PromotionCommissionLedger{},
 		&PromotionWithdrawal{},
 		&PromotionWithdrawalItem{},
+		&PromotionWithdrawalOperation{},
+		&PromotionWithdrawalPayoutReference{},
 		&PromotionRefundCase{},
+		&PromotionRefundCaseUser{},
+		&PromotionRefundObligation{},
+		&PromotionRefundAction{},
+		&PromotionRefundRecoveryReceipt{},
 		&GrowthRewardItem{},
 		&GrowthReward{},
 		&GrowthRewardBudget{},
@@ -298,6 +312,9 @@ func migrateDB() error {
 		&SubscriptionOrder{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
+		&BillingAdjustmentJournal{},
+		&SubscriptionAdminOperation{},
+		&SubscriptionAdminOperationItem{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
@@ -310,9 +327,28 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
+	if err := BackfillNullUserRefundHolds(); err != nil {
+		return err
+	}
+	if err := BackfillTopUpPurposes(); err != nil {
+		return err
+	}
+	if err := MigrateLegacyPromotionRefundAccounting(); err != nil {
+		return err
+	}
+	if err := ReconcilePendingPromotionRefundTopUps(DB); err != nil {
+		return err
+	}
 	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
 		return err
 	}
+	if err := BackfillPromotionWithdrawalPayoutReferences(DB); err != nil {
+		return err
+	}
+	// Historical fund journals and withdrawal-operation audit rows can be large
+	// and are not required to make a new financial write safe. The leased
+	// promotion_fund_reconcile system task starts immediately after boot and
+	// performs these idempotent scans without holding the service startup path.
 	if err := EnsureDefaultGrowthRewardItems(); err != nil {
 		return err
 	}
@@ -338,6 +374,9 @@ func migrateDBFast() error {
 	if err := migrateGrowthRewardTables(); err != nil {
 		return err
 	}
+	if err := migrateSubscriptionOrderUserSubscriptionLinkSQLite(); err != nil {
+		return err
+	}
 
 	var wg sync.WaitGroup
 
@@ -361,10 +400,19 @@ func migrateDBFast() error {
 		{&InvitationRebate{}, "InvitationRebate"},
 		{&InvitationReward{}, "InvitationReward"},
 		{&PromotionEvent{}, "PromotionEvent"},
+		{&PromotionFundTransaction{}, "PromotionFundTransaction"},
+		{&PromotionFundTransactionLeg{}, "PromotionFundTransactionLeg"},
+		{&PromotionFundBackfillCheckpoint{}, "PromotionFundBackfillCheckpoint"},
 		{&PromotionCommissionLedger{}, "PromotionCommissionLedger"},
 		{&PromotionWithdrawal{}, "PromotionWithdrawal"},
 		{&PromotionWithdrawalItem{}, "PromotionWithdrawalItem"},
+		{&PromotionWithdrawalOperation{}, "PromotionWithdrawalOperation"},
+		{&PromotionWithdrawalPayoutReference{}, "PromotionWithdrawalPayoutReference"},
 		{&PromotionRefundCase{}, "PromotionRefundCase"},
+		{&PromotionRefundCaseUser{}, "PromotionRefundCaseUser"},
+		{&PromotionRefundObligation{}, "PromotionRefundObligation"},
+		{&PromotionRefundAction{}, "PromotionRefundAction"},
+		{&PromotionRefundRecoveryReceipt{}, "PromotionRefundRecoveryReceipt"},
 		{&GrowthRewardItem{}, "GrowthRewardItem"},
 		{&GrowthReward{}, "GrowthReward"},
 		{&GrowthRewardBudget{}, "GrowthRewardBudget"},
@@ -381,6 +429,9 @@ func migrateDBFast() error {
 		{&SubscriptionOrder{}, "SubscriptionOrder"},
 		{&UserSubscription{}, "UserSubscription"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
+		{&BillingAdjustmentJournal{}, "BillingAdjustmentJournal"},
+		{&SubscriptionAdminOperation{}, "SubscriptionAdminOperation"},
+		{&SubscriptionAdminOperationItem{}, "SubscriptionAdminOperationItem"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
 		{&PerfMetric{}, "PerfMetric"},
@@ -411,9 +462,26 @@ func migrateDBFast() error {
 			return err
 		}
 	}
+	if err := BackfillNullUserRefundHolds(); err != nil {
+		return err
+	}
+	if err := BackfillTopUpPurposes(); err != nil {
+		return err
+	}
+	if err := MigrateLegacyPromotionRefundAccounting(); err != nil {
+		return err
+	}
+	if err := ReconcilePendingPromotionRefundTopUps(DB); err != nil {
+		return err
+	}
 	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
 		return err
 	}
+	if err := BackfillPromotionWithdrawalPayoutReferences(DB); err != nil {
+		return err
+	}
+	// Historical fund journals and withdrawal-operation audit rows are filled
+	// by the leased promotion_fund_reconcile system task after startup.
 	if err := EnsureDefaultGrowthRewardItems(); err != nil {
 		return err
 	}
@@ -535,6 +603,19 @@ func clickHouseCreateTableHasTTL(createTableSQL string) bool {
 type sqliteColumnDef struct {
 	Name string
 	DDL  string
+}
+
+// migrateSubscriptionOrderUserSubscriptionLinkSQLite adds the nullable column
+// separately because SQLite rejects ALTER TABLE ADD COLUMN when GORM inlines
+// the field's UNIQUE constraint. AutoMigrate creates the unique index after
+// this compatibility step.
+func migrateSubscriptionOrderUserSubscriptionLinkSQLite() error {
+	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) ||
+		!DB.Migrator().HasTable(&SubscriptionOrder{}) ||
+		DB.Migrator().HasColumn(&SubscriptionOrder{}, "user_subscription_id") {
+		return nil
+	}
+	return DB.Exec("ALTER TABLE `subscription_orders` ADD COLUMN `user_subscription_id` integer").Error
 }
 
 func ensureSubscriptionPlanTableSQLite() error {

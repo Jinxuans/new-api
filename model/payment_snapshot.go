@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/shopspring/decimal"
 )
 
@@ -18,8 +19,9 @@ var (
 // unit, so downstream commission calculations never depend on the mutable
 // checkout estimate stored in TopUp.Money.
 type VerifiedPayment struct {
-	AmountMinor int64
-	Currency    string
+	AmountMinor       int64
+	Currency          string
+	ProviderPaymentId string
 }
 
 func NewVerifiedPaymentFromMinor(amountMinor int64, currency string) (VerifiedPayment, error) {
@@ -63,6 +65,8 @@ func (topUp *TopUp) setVerifiedPayment(payment VerifiedPayment) error {
 	topUp.PaidAmountMinor = validated.AmountMinor
 	topUp.PaidCurrency = validated.Currency
 	topUp.PaidAmountVerified = true
+	topUp.ProviderPaymentId = strings.TrimSpace(payment.ProviderPaymentId)
+	topUp.PaymentVerifiedAt = common.GetTimestamp()
 	return nil
 }
 
@@ -75,6 +79,10 @@ func (topUp *TopUp) verifyStoredPayment(payment VerifiedPayment) error {
 		return nil
 	}
 	if topUp.PaidAmountMinor != validated.AmountMinor || topUp.PaidCurrency != validated.Currency {
+		return ErrVerifiedPaymentMismatch
+	}
+	providerPaymentId := strings.TrimSpace(payment.ProviderPaymentId)
+	if topUp.ProviderPaymentId != "" && providerPaymentId != "" && topUp.ProviderPaymentId != providerPaymentId {
 		return ErrVerifiedPaymentMismatch
 	}
 	return nil
