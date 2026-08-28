@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -181,6 +182,25 @@ func TestRedisCachedDurableRefundHoldBlocksReservationWithoutFence(t *testing.T)
 	require.NoError(t, err)
 	assert.True(t, cached.RefundHold)
 	assert.Equal(t, 20, cached.Quota)
+}
+
+func TestBatchUpdateAccumulatorSaturatesOverflow(t *testing.T) {
+	resetBatchUpdateTestState(t)
+
+	addNewRecord(BatchUpdateTypeUsedQuota, 1, math.MaxInt)
+	addNewRecord(BatchUpdateTypeUsedQuota, 1, 1)
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Lock()
+	assert.Equal(t, math.MaxInt, batchUpdateStores[BatchUpdateTypeUsedQuota][1])
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Unlock()
+
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Lock()
+	batchUpdateStores[BatchUpdateTypeUsedQuota] = make(map[int]int)
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Unlock()
+	addNewRecord(BatchUpdateTypeUsedQuota, 1, math.MinInt)
+	addNewRecord(BatchUpdateTypeUsedQuota, 1, -1)
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Lock()
+	assert.Equal(t, math.MinInt, batchUpdateStores[BatchUpdateTypeUsedQuota][1])
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Unlock()
 }
 
 func TestReserveFallsBackToDatabaseWhenRedisIsUnavailable(t *testing.T) {

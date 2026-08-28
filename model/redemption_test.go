@@ -166,6 +166,7 @@ func TestRedeemCreditsQuotaExactlyOnce(t *testing.T) {
 	assert.Equal(t, 500, user.Quota)
 }
 
+
 func TestRedeemRollsBackCodeBalanceAndFundRecordOnWalletOverflow(t *testing.T) {
 	userId, key := setupRedeemFixture(t, 500)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", userId).Update("quota", common.MaxQuota-100).Error)
@@ -244,6 +245,19 @@ func TestHardDeleteUserRetainsSoftDeletedLegacyUsedRedemption(t *testing.T) {
 	var retained User
 	require.NoError(t, DB.Unscoped().First(&retained, user.Id).Error)
 	assert.False(t, retained.DeletedAt.Valid)
+}
+
+func TestRedemptionQuotaRejectsWalletOverflow(t *testing.T) {
+	setupRedeemFixture(t, 500)
+
+	redemption := &Redemption{
+		Name:        "overflow-redemption",
+		Key:         "10000000000000000000000000000002",
+		Status:      common.RedemptionCodeStatusEnabled,
+		Quota:       common.MaxQuota + 1,
+		CreatedTime: common.GetTimestamp(),
+	}
+	require.Error(t, redemption.Insert())
 }
 
 // Exactly one of several concurrent redeems of the same code may win, and

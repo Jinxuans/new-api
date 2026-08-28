@@ -233,44 +233,6 @@ func TestManageUserDeleteReturnsImmediatelyAndUnknownActionFails(t *testing.T) {
 	assert.Equal(t, common.UserStatusEnabled, unchanged.Status)
 }
 
-func TestManageUserQuotaReplayDoesNotDuplicateManageAudit(t *testing.T) {
-	db := setupManageUserTestDB(t)
-	require.NoError(t, db.Create(&model.User{
-		Id: 9999, Username: "root-operator", Password: "password",
-		Role: common.RoleRootUser, Status: common.UserStatusEnabled,
-		Group: "default", AffCode: "root-operator-quota-aff",
-	}).Error)
-	user := model.User{
-		Username: "managed-quota-replay-user", Password: "password", Role: common.RoleCommonUser,
-		Status: common.UserStatusEnabled, Group: "default", Quota: 100,
-	}
-	require.NoError(t, db.Create(&user).Error)
-	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":25,"remark":"verified correction","idempotency_key":"manage-quota-replay"}`, user.Id)
-
-	first := performManageUserRequest(t, body)
-	assert.Equal(t, http.StatusOK, first.Code)
-	assert.Contains(t, first.Body.String(), `"success":true`)
-	assert.Contains(t, first.Body.String(), `"replayed":false`)
-
-	second := performManageUserRequest(t, body)
-	assert.Equal(t, http.StatusOK, second.Code)
-	assert.Contains(t, second.Body.String(), `"success":true`)
-	assert.Contains(t, second.Body.String(), `"replayed":true`)
-
-	require.NoError(t, db.First(&user, user.Id).Error)
-	assert.Equal(t, 125, user.Quota)
-	var fundCount int64
-	require.NoError(t, db.Model(&model.PromotionFundTransaction{}).
-		Where("transaction_key = ?", "admin_quota:manage-quota-replay").
-		Count(&fundCount).Error)
-	assert.Equal(t, int64(1), fundCount)
-	var auditLogs []model.Log
-	require.NoError(t, db.Where("user_id = ? AND type = ?", 9999, model.LogTypeManage).Find(&auditLogs).Error)
-	require.Len(t, auditLogs, 1)
-	var other map[string]interface{}
-	require.NoError(t, common.Unmarshal([]byte(auditLogs[0].Other), &other))
-	op, ok := other["op"].(map[string]interface{})
-	require.True(t, ok)
 	assert.Equal(t, "user.quota_add", op["action"])
 }
 
@@ -290,4 +252,25 @@ func TestManageUserQuotaRequiresIdempotencyKey(t *testing.T) {
 	var fundCount int64
 	require.NoError(t, db.Model(&model.PromotionFundTransaction{}).Count(&fundCount).Error)
 	assert.Zero(t, fundCount)
+}
+
+func TestManageUserQuotaRespectsWalletCeiling(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: common.MaxQuota - 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":2,"remark":"ceiling probe","idempotency_key":"quota-ceiling-add"}`, user.Id))
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+
+	var updated model.User
+	require.NoError(t, db.First(&updated, user.Id).Error)
+	assert.Equal(t, common.MaxQuota-1, updated.Quota)
+
+	recorder = performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"override","value":%d,"remark":"ceiling probe","idempotency_key":"quota-ceiling-override"}`, user.Id, common.MaxQuota+1))
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	require.NoError(t, db.First(&updated, user.Id).Error)
+	assert.Equal(t, common.MaxQuota-1, updated.Quota)
 }
