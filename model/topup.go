@@ -112,10 +112,10 @@ func (topUp *TopUp) Insert() error {
 }
 
 func topUpQuotaMaxCurrent(creditedQuota int) (int, error) {
-	if creditedQuota <= 0 || creditedQuota > common.MaxWalletQuota {
+	if creditedQuota <= 0 || creditedQuota >= common.MaxQuota {
 		return 0, ErrInvalidTopUpQuota
 	}
-	return common.MaxWalletQuota - creditedQuota, nil
+	return common.MaxQuota - 1 - creditedQuota, nil
 }
 
 // ValidateTopUpQuotaCapacity performs the user-facing pre-payment check. The

@@ -382,15 +382,15 @@ func TestRechargeEpayEnforcesFinalWalletQuotaLimit(t *testing.T) {
 	}{
 		{
 			name:         "allows exact highest representable wallet balance",
-			currentQuota: common.MaxWalletQuota - 1_000_000,
-			wantQuota:    common.MaxWalletQuota,
+			currentQuota: common.MaxQuota - 1 - 1_000_000,
+			wantQuota:    common.MaxQuota - 1,
 			wantStatus:   common.TopUpStatusSuccess,
 		},
 		{
 			name:         "rejects balance above wallet quota domain",
-			currentQuota: common.MaxWalletQuota - 999_999,
+			currentQuota: common.MaxQuota - 1_000_000,
 			wantErr:      true,
-			wantQuota:    common.MaxWalletQuota - 999_999,
+			wantQuota:    common.MaxQuota - 1_000_000,
 			wantStatus:   common.TopUpStatusPending,
 		},
 	}
