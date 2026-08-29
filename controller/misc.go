@@ -98,6 +98,8 @@ func GetStatus(c *gin.Context) {
 		"invite_rebate_percentage":      common.InviteRebatePercentage,
 		"quota_for_inviter":             common.QuotaForInviter,
 
+		"password_login_encryption_enabled": common.PasswordLoginEncryptionEnabled,
+
 		"usd_exchange_rate": operation_setting.USDExchangeRate,
 		"price":             operation_setting.Price,
 		"stripe_unit_price": setting.StripeUnitPrice,

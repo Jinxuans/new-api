@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -36,6 +38,8 @@ type Pricing struct {
 	BillingMode            string                                `json:"billing_mode,omitempty"`
 	BillingExpr            string                                `json:"billing_expr,omitempty"`
 	ImageBillingRule       *billing_setting.ImageBillingRuleView `json:"image_billing_rule,omitempty"`
+	BillingUsageSchema     map[string]jsplugin.UsageFieldSchema  `json:"billing_usage_schema,omitempty"`
+	BillingUsageExamples   []jsplugin.UsageExample               `json:"billing_usage_examples,omitempty"`
 	PricingVersion         string                                `json:"pricing_version,omitempty"`
 }
 
@@ -356,6 +360,7 @@ func updatePricing() {
 	}
 
 	pricingMap = make([]Pricing, 0)
+	pluginGeneration := jsplugin.DefaultRegistry.Generation()
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
 			ModelName:              model,
@@ -409,6 +414,27 @@ func updatePricing() {
 		}
 		if imageRule, ok := billing_setting.GetImageBillingRuleView(model); ok {
 			pricing.ImageBillingRule = imageRule
+		}
+		if plugin, ok := pluginGeneration.GetByModel(model); ok && len(plugin.Meta.UsageSchema) > 0 {
+			pricing.BillingUsageSchema = make(map[string]jsplugin.UsageFieldSchema, len(plugin.Meta.UsageSchema))
+			for key, field := range plugin.Meta.UsageSchema {
+				field.Enum = append([]string(nil), field.Enum...)
+				field.Description = maps.Clone(field.Description)
+				pricing.BillingUsageSchema[key] = field
+			}
+			if len(plugin.Meta.UsageExamples) > 0 {
+				pricing.BillingUsageExamples = make([]jsplugin.UsageExample, len(plugin.Meta.UsageExamples))
+				for index, example := range plugin.Meta.UsageExamples {
+					facts := make(map[string]any, len(example.Facts))
+					for key, value := range example.Facts {
+						facts[key] = value
+					}
+					pricing.BillingUsageExamples[index] = jsplugin.UsageExample{
+						Label: example.Label,
+						Facts: facts,
+					}
+				}
+			}
 		}
 		pricingMap = append(pricingMap, pricing)
 	}
