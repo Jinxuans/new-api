@@ -6696,6 +6696,9 @@
     "Versions": "Versions",
     "View the complete details for this task": "Afficher tous les détails de cette tâche",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "Si cette option est désactivée, tous les plugins personnalisés téléversés sont ignorés et chaque plateforme utilise son plugin d’usine intégré.",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "Une fois désactivé, tout le système de plugins de tâche s’arrête, y compris les plugins d’usine et personnalisés."
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "Une fois désactivé, tout le système de plugins de tâche s’arrête, y compris les plugins d’usine et personnalisés.",
+    "Updates with the system": "Mise à jour système",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "La version intégrée est v{{factory}} ; supprimez la version personnalisée pour y revenir",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "Préférence enregistrée comme {{pref}}, mais aucun abonnement actif. Les demandes seront rejetées."
   }
 }

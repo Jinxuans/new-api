@@ -6696,6 +6696,9 @@
     "Versions": "版本",
     "View the complete details for this task": "查看此任务的完整详情",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "关闭后，所有上传的自定义插件都会被忽略，每个平台均回落到内置的出厂插件。",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "关闭后，整个任务插件系统停止服务，包括出厂插件和自定义插件。"
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "关闭后，整个任务插件系统停止服务，包括出厂插件和自定义插件。",
+    "Updates with the system": "随系统更新",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "内置版本为 v{{factory}}；删除自定义版本即可恢复",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "已保存偏好为{{pref}}，当前无生效订阅，请求将被拒绝"
   }
 }

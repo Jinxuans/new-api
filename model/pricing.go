@@ -18,29 +18,29 @@ import (
 )
 
 type Pricing struct {
-	ModelName              string                                `json:"model_name"`
-	Description            string                                `json:"description,omitempty"`
-	Icon                   string                                `json:"icon,omitempty"`
-	Tags                   string                                `json:"tags,omitempty"`
-	VendorID               int                                   `json:"vendor_id,omitempty"`
-	QuotaType              int                                   `json:"quota_type"`
-	ModelRatio             float64                               `json:"model_ratio"`
-	ModelPrice             float64                               `json:"model_price"`
-	OwnerBy                string                                `json:"owner_by"`
-	CompletionRatio        float64                               `json:"completion_ratio"`
-	CacheRatio             *float64                              `json:"cache_ratio,omitempty"`
-	CreateCacheRatio       *float64                              `json:"create_cache_ratio,omitempty"`
-	ImageRatio             *float64                              `json:"image_ratio,omitempty"`
-	AudioRatio             *float64                              `json:"audio_ratio,omitempty"`
-	AudioCompletionRatio   *float64                              `json:"audio_completion_ratio,omitempty"`
-	EnableGroup            []string                              `json:"enable_groups"`
-	SupportedEndpointTypes []constant.EndpointType               `json:"supported_endpoint_types"`
+	ModelName              string                               `json:"model_name"`
+	Description            string                               `json:"description,omitempty"`
+	Icon                   string                               `json:"icon,omitempty"`
+	Tags                   string                               `json:"tags,omitempty"`
+	VendorID               int                                  `json:"vendor_id,omitempty"`
+	QuotaType              int                                  `json:"quota_type"`
+	ModelRatio             float64                              `json:"model_ratio"`
+	ModelPrice             float64                              `json:"model_price"`
+	OwnerBy                string                               `json:"owner_by"`
+	CompletionRatio        float64                              `json:"completion_ratio"`
+	CacheRatio             *float64                             `json:"cache_ratio,omitempty"`
+	CreateCacheRatio       *float64                             `json:"create_cache_ratio,omitempty"`
+	ImageRatio             *float64                             `json:"image_ratio,omitempty"`
+	AudioRatio             *float64                             `json:"audio_ratio,omitempty"`
+	AudioCompletionRatio   *float64                             `json:"audio_completion_ratio,omitempty"`
+	EnableGroup            []string                             `json:"enable_groups"`
+	SupportedEndpointTypes []constant.EndpointType              `json:"supported_endpoint_types"`
 	BillingMode            string                                `json:"billing_mode,omitempty"`
 	BillingExpr            string                                `json:"billing_expr,omitempty"`
 	ImageBillingRule       *billing_setting.ImageBillingRuleView `json:"image_billing_rule,omitempty"`
 	BillingUsageSchema     map[string]jsplugin.UsageFieldSchema  `json:"billing_usage_schema,omitempty"`
-	BillingUsageExamples   []jsplugin.UsageExample               `json:"billing_usage_examples,omitempty"`
-	PricingVersion         string                                `json:"pricing_version,omitempty"`
+	BillingUsageExamples   []jsplugin.UsageExample              `json:"billing_usage_examples,omitempty"`
+	PricingVersion         string                               `json:"pricing_version,omitempty"`
 }
 
 type PricingVendor struct {
@@ -411,11 +411,24 @@ func updatePricing() {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
 			}
+		} else if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" {
+			if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" {
+				if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
+					pricing.BillingMode = tailMode
+					pricing.BillingExpr = expr
+				}
+			}
 		}
-		if imageRule, ok := billing_setting.GetImageBillingRuleView(model); ok {
-			pricing.ImageBillingRule = imageRule
+			if imageRule, ok := billing_setting.GetImageBillingRuleView(model); ok {
+				pricing.ImageBillingRule = imageRule
+			}
+			plugin, ok := pluginGeneration.GetByModel(model)
+			if !ok {
+			if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved {
+				plugin, ok = pluginGeneration.Get(target.PluginKey)
+			}
 		}
-		if plugin, ok := pluginGeneration.GetByModel(model); ok && len(plugin.Meta.UsageSchema) > 0 {
+		if ok && plugin != nil && len(plugin.Meta.UsageSchema) > 0 {
 			pricing.BillingUsageSchema = make(map[string]jsplugin.UsageFieldSchema, len(plugin.Meta.UsageSchema))
 			for key, field := range plugin.Meta.UsageSchema {
 				field.Enum = append([]string(nil), field.Enum...)

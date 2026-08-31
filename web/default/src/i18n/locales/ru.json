@@ -6696,6 +6696,9 @@
     "Versions": "Версии",
     "View the complete details for this task": "Просмотреть полные сведения об этой задаче",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "При отключении все загруженные пользовательские плагины игнорируются, а каждая платформа использует встроенный заводской плагин.",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "При отключении вся система плагинов задач перестаёт обслуживать запросы, включая заводские и пользовательские плагины."
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "При отключении вся система плагинов задач перестаёт обслуживать запросы, включая заводские и пользовательские плагины.",
+    "Updates with the system": "Обновляется с системой",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "Встроенная версия — v{{factory}}; удалите свою, чтобы вернуться к ней",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "Настройка сохранена как {{pref}}, но нет активной подписки. Запросы будут отклонены."
   }
 }

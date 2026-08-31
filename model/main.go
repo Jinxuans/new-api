@@ -27,6 +27,19 @@ var commonFalseVal string
 var logKeyCol string
 var logGroupCol string
 
+// jsonScanBytes 归一化 json 列的驱动返回值:不同驱动/协议模式下同一列可能
+// 以 []byte 或 string 返回,静默丢弃 string 会导致字段被清零而不报错。
+func jsonScanBytes(value interface{}) []byte {
+	switch v := value.(type) {
+	case []byte:
+		return v
+	case string:
+		return []byte(v)
+	default:
+		return nil
+	}
+}
+
 func initCol() {
 	// init common column names
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
@@ -72,9 +85,7 @@ func createRootAccountIfNeed() error {
 			AccessToken: nil,
 			Quota:       100000000,
 		}
-		if err := CreateInitialRootUser(&rootUser); err != nil {
-			return err
-		}
+		DB.Create(&rootUser)
 	}
 	return nil
 }
@@ -140,10 +151,12 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 		if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 			// Use PostgreSQL
 			common.SysLog("using PostgreSQL as database")
+			// 同时关闭 pgx 隐式与 GORM 显式预处理语句:命名 prepared statement 与
+			// 事务池代理(PgBouncer/Neon/Supabase)不兼容,会触发 FATAL 08P01/42P05。
 			db, err := gorm.Open(postgres.New(postgres.Config{
 				DSN:                  dsn,
-				PreferSimpleProtocol: true, // disables implicit prepared statement usage
-			}), newGormConfig(true))
+				PreferSimpleProtocol: true,
+			}), newGormConfig(false))
 			return db, common.DatabaseTypePostgreSQL, err
 		}
 		if strings.HasPrefix(dsn, "local") {
@@ -187,6 +200,9 @@ func InitDB() (err error) {
 			if err := checkMySQLChineseSupport(DB); err != nil {
 				panic(err)
 			}
+		}
+		if err := ensureUserQuotaColumns(DB, common.MainDatabaseType()); err != nil {
+			return err
 		}
 		sqlDB, err := DB.DB()
 		if err != nil {
@@ -252,17 +268,63 @@ func InitLogDB() (err error) {
 	return err
 }
 
+var userQuotaColumns = []string{"quota", "used_quota", "aff_quota", "aff_history"}
+
+// ensureUserQuotaColumns rejects a legacy 32-bit wallet schema before any
+// migrations run. The 64-bit-only build intentionally does not auto-upgrade
+// an existing wallet; operators must migrate it explicitly before starting.
+func ensureUserQuotaColumns(db *gorm.DB, dbType common.DatabaseType) error {
+	if common.GetEnvOrDefaultBool("SKIP_64BIT_QUOTA_SCHEMA_CHECK", false) {
+		common.SysLog("SKIP_64BIT_QUOTA_SCHEMA_CHECK=true; skipping user quota schema check")
+		return nil
+	}
+	if db == nil || dbType == common.DatabaseTypeSQLite {
+		return nil
+	}
+	if !db.Migrator().HasTable(&User{}) {
+		return nil
+	}
+	columnTypes, err := db.Migrator().ColumnTypes(&User{})
+	if err != nil {
+		return fmt.Errorf("failed to inspect users schema: %w", err)
+	}
+	for _, expected := range userQuotaColumns {
+		for _, actual := range columnTypes {
+			if !strings.EqualFold(actual.Name(), expected) {
+				continue
+			}
+			dataType := actual.DatabaseTypeName()
+			if !is64BitIntegerType(dbType, dataType) {
+				return fmt.Errorf("users.%s uses %s; 32-bit is not supported", expected, dataType)
+			}
+		}
+	}
+	return nil
+}
+
+func is64BitIntegerType(dbType common.DatabaseType, dataType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(dataType))
+	switch dbType {
+	case common.DatabaseTypeMySQL:
+		return normalized == "bigint" || normalized == "unsigned bigint" || normalized == "bigint unsigned"
+	case common.DatabaseTypePostgreSQL:
+		return normalized == "bigint" || normalized == "int8"
+	default:
+		return false
+	}
+}
+
 func migrateDB() error {
+	if err := migrateTokenKeyUniqueness(DB); err != nil {
+		return err
+	}
+	if err := migratePrefillGroupUniqueness(DB); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
 	if err := migrateTokenModelLimitsToText(); err != nil {
-		return err
-	}
-	if err := migrateGrowthRewardTables(); err != nil {
-		return err
-	}
-	if err := migrateSubscriptionOrderUserSubscriptionLinkSQLite(); err != nil {
 		return err
 	}
 
@@ -281,26 +343,6 @@ func migrateDB() error {
 		&Log{},
 		&Midjourney{},
 		&TopUp{},
-		&InvitationRebate{},
-		&InvitationReward{},
-		&PromotionEvent{},
-		&PromotionFundTransaction{},
-		&PromotionFundTransactionLeg{},
-		&PromotionFundBackfillCheckpoint{},
-		&PromotionCommissionLedger{},
-		&PromotionWithdrawal{},
-		&PromotionWithdrawalItem{},
-		&PromotionWithdrawalOperation{},
-		&PromotionWithdrawalPayoutReference{},
-		&PromotionRefundCase{},
-		&PromotionRefundCaseUser{},
-		&PromotionRefundObligation{},
-		&PromotionRefundAction{},
-		&PromotionRefundRecoveryReceipt{},
-		&GrowthRewardItem{},
-		&GrowthReward{},
-		&GrowthRewardBudget{},
-		&GrowthSubmission{},
 		&QuotaData{},
 		&Task{},
 		&TaskPlugin{},
@@ -314,9 +356,6 @@ func migrateDB() error {
 		&SubscriptionOrder{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
-		&BillingAdjustmentJournal{},
-		&SubscriptionAdminOperation{},
-		&SubscriptionAdminOperationItem{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
@@ -329,31 +368,6 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
-	if err := BackfillNullUserRefundHolds(); err != nil {
-		return err
-	}
-	if err := BackfillTopUpPurposes(); err != nil {
-		return err
-	}
-	if err := MigrateLegacyPromotionRefundAccounting(); err != nil {
-		return err
-	}
-	if err := ReconcilePendingPromotionRefundTopUps(DB); err != nil {
-		return err
-	}
-	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
-		return err
-	}
-	if err := BackfillPromotionWithdrawalPayoutReferences(DB); err != nil {
-		return err
-	}
-	// Historical fund journals and withdrawal-operation audit rows can be large
-	// and are not required to make a new financial write safe. The leased
-	// promotion_fund_reconcile system task starts immediately after boot and
-	// performs these idempotent scans without holding the service startup path.
-	if err := EnsureDefaultGrowthRewardItems(); err != nil {
-		return err
-	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -369,141 +383,6 @@ func migrateDB() error {
 			return err
 		}
 	}
-	return nil
-}
-
-func migrateDBFast() error {
-	if err := migrateGrowthRewardTables(); err != nil {
-		return err
-	}
-	if err := migrateSubscriptionOrderUserSubscriptionLinkSQLite(); err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-
-	migrations := []struct {
-		model interface{}
-		name  string
-	}{
-		{&Channel{}, "Channel"},
-		{&Token{}, "Token"},
-		{&User{}, "User"},
-		{&UserSession{}, "UserSession"},
-		{&AuthFlow{}, "AuthFlow"},
-		{&ExternalIdentityClaim{}, "ExternalIdentityClaim"},
-		{&PasskeyCredential{}, "PasskeyCredential"},
-		{&Option{}, "Option"},
-		{&LoginEncryptionKey{}, "LoginEncryptionKey"},
-		{&Redemption{}, "Redemption"},
-		{&Ability{}, "Ability"},
-		{&Log{}, "Log"},
-		{&Midjourney{}, "Midjourney"},
-		{&TopUp{}, "TopUp"},
-		{&InvitationRebate{}, "InvitationRebate"},
-		{&InvitationReward{}, "InvitationReward"},
-		{&PromotionEvent{}, "PromotionEvent"},
-		{&PromotionFundTransaction{}, "PromotionFundTransaction"},
-		{&PromotionFundTransactionLeg{}, "PromotionFundTransactionLeg"},
-		{&PromotionFundBackfillCheckpoint{}, "PromotionFundBackfillCheckpoint"},
-		{&PromotionCommissionLedger{}, "PromotionCommissionLedger"},
-		{&PromotionWithdrawal{}, "PromotionWithdrawal"},
-		{&PromotionWithdrawalItem{}, "PromotionWithdrawalItem"},
-		{&PromotionWithdrawalOperation{}, "PromotionWithdrawalOperation"},
-		{&PromotionWithdrawalPayoutReference{}, "PromotionWithdrawalPayoutReference"},
-		{&PromotionRefundCase{}, "PromotionRefundCase"},
-		{&PromotionRefundCaseUser{}, "PromotionRefundCaseUser"},
-		{&PromotionRefundObligation{}, "PromotionRefundObligation"},
-		{&PromotionRefundAction{}, "PromotionRefundAction"},
-		{&PromotionRefundRecoveryReceipt{}, "PromotionRefundRecoveryReceipt"},
-		{&GrowthRewardItem{}, "GrowthRewardItem"},
-		{&GrowthReward{}, "GrowthReward"},
-		{&GrowthRewardBudget{}, "GrowthRewardBudget"},
-		{&GrowthSubmission{}, "GrowthSubmission"},
-		{&QuotaData{}, "QuotaData"},
-		{&Task{}, "Task"},
-		{&Model{}, "Model"},
-		{&Vendor{}, "Vendor"},
-		{&PrefillGroup{}, "PrefillGroup"},
-		{&Setup{}, "Setup"},
-		{&TwoFA{}, "TwoFA"},
-		{&TwoFABackupCode{}, "TwoFABackupCode"},
-		{&Checkin{}, "Checkin"},
-		{&SubscriptionOrder{}, "SubscriptionOrder"},
-		{&UserSubscription{}, "UserSubscription"},
-		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
-		{&BillingAdjustmentJournal{}, "BillingAdjustmentJournal"},
-		{&SubscriptionAdminOperation{}, "SubscriptionAdminOperation"},
-		{&SubscriptionAdminOperationItem{}, "SubscriptionAdminOperationItem"},
-		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
-		{&UserOAuthBinding{}, "UserOAuthBinding"},
-		{&PerfMetric{}, "PerfMetric"},
-		{&SystemInstance{}, "SystemInstance"},
-		{&SystemTask{}, "SystemTask"},
-		{&SystemTaskLock{}, "SystemTaskLock"},
-	}
-	// 动态计算migration数量，确保errChan缓冲区足够大
-	errChan := make(chan error, len(migrations))
-
-	for _, m := range migrations {
-		wg.Add(1)
-		go func(model interface{}, name string) {
-			defer wg.Done()
-			if err := DB.AutoMigrate(model); err != nil {
-				errChan <- fmt.Errorf("failed to migrate %s: %v", name, err)
-			}
-		}(m.model, m.name)
-	}
-
-	// Wait for all migrations to complete
-	wg.Wait()
-	close(errChan)
-
-	// Check for any errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-	if err := BackfillNullUserRefundHolds(); err != nil {
-		return err
-	}
-	if err := BackfillTopUpPurposes(); err != nil {
-		return err
-	}
-	if err := MigrateLegacyPromotionRefundAccounting(); err != nil {
-		return err
-	}
-	if err := ReconcilePendingPromotionRefundTopUps(DB); err != nil {
-		return err
-	}
-	if err := FreezeUnverifiedTopUpPromotionCommissions(); err != nil {
-		return err
-	}
-	if err := BackfillPromotionWithdrawalPayoutReferences(DB); err != nil {
-		return err
-	}
-	// Historical fund journals and withdrawal-operation audit rows are filled
-	// by the leased promotion_fund_reconcile system task after startup.
-	if err := EnsureDefaultGrowthRewardItems(); err != nil {
-		return err
-	}
-	if err := InitializeUserAuthVersions(); err != nil {
-		return err
-	}
-	if err := InitializeExternalIdentityClaims(); err != nil {
-		return err
-	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
-			return err
-		}
-	} else {
-		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
-			return err
-		}
-	}
-	common.SysLog("database migrated")
 	return nil
 }
 
@@ -608,19 +487,6 @@ type sqliteColumnDef struct {
 	DDL  string
 }
 
-// migrateSubscriptionOrderUserSubscriptionLinkSQLite adds the nullable column
-// separately because SQLite rejects ALTER TABLE ADD COLUMN when GORM inlines
-// the field's UNIQUE constraint. AutoMigrate creates the unique index after
-// this compatibility step.
-func migrateSubscriptionOrderUserSubscriptionLinkSQLite() error {
-	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) ||
-		!DB.Migrator().HasTable(&SubscriptionOrder{}) ||
-		DB.Migrator().HasColumn(&SubscriptionOrder{}, "user_subscription_id") {
-		return nil
-	}
-	return DB.Exec("ALTER TABLE `subscription_orders` ADD COLUMN `user_subscription_id` integer").Error
-}
-
 func ensureSubscriptionPlanTableSQLite() error {
 	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		return nil
@@ -645,7 +511,6 @@ func ensureSubscriptionPlanTableSQLite() error {
 ` + "`waffo_pancake_product_id`" + ` varchar(128) DEFAULT '',
 ` + "`max_purchase_per_user`" + ` integer DEFAULT 0,
 ` + "`upgrade_group`" + ` varchar(64) DEFAULT '',
-` + "`supported_groups`" + ` text DEFAULT '',
 ` + "`downgrade_group`" + ` varchar(64) DEFAULT '',
 ` + "`total_amount`" + ` bigint NOT NULL DEFAULT 0,
 ` + "`quota_reset_period`" + ` varchar(16) DEFAULT 'never',
@@ -683,7 +548,6 @@ PRIMARY KEY (` + "`id`" + `)
 		{Name: "waffo_pancake_product_id", DDL: "`waffo_pancake_product_id` varchar(128) DEFAULT ''"},
 		{Name: "max_purchase_per_user", DDL: "`max_purchase_per_user` integer DEFAULT 0"},
 		{Name: "upgrade_group", DDL: "`upgrade_group` varchar(64) DEFAULT ''"},
-		{Name: "supported_groups", DDL: "`supported_groups` text DEFAULT ''"},
 		{Name: "downgrade_group", DDL: "`downgrade_group` varchar(64) DEFAULT ''"},
 		{Name: "total_amount", DDL: "`total_amount` bigint NOT NULL DEFAULT 0"},
 		{Name: "quota_reset_period", DDL: "`quota_reset_period` varchar(16) DEFAULT 'never'"},

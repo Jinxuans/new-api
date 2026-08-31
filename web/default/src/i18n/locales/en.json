@@ -6696,6 +6696,9 @@
     "Versions": "Versions",
     "View the complete details for this task": "View the complete details for this task",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "When disabled, the entire task plugin system stops serving, including factory and custom plugins."
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "When disabled, the entire task plugin system stops serving, including factory and custom plugins.",
+    "Updates with the system": "Updates with the system",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "Built-in is v{{factory}}; delete the custom version to return to it",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "Preference saved as {{pref}}, but no active subscription. Requests will be rejected."
   }
 }

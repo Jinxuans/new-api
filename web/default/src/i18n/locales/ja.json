@@ -6696,6 +6696,9 @@
     "Versions": "バージョン",
     "View the complete details for this task": "このタスクの完全な詳細を表示します",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "無効にすると、アップロード済みのカスタムプラグインはすべて無視され、各プラットフォームは内蔵のファクトリープラグインにフォールバックします。",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "無効にすると、ファクトリープラグインとカスタムプラグインを含むタスクプラグインシステム全体が停止します。"
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "無効にすると、ファクトリープラグインとカスタムプラグインを含むタスクプラグインシステム全体が停止します。",
+    "Updates with the system": "システムとともに更新",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "組み込みは v{{factory}} です。カスタム版を削除すると戻ります",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "設定は{{pref}}として保存されましたが、アクティブなサブスクリプションがありません。リクエストは拒否されます。"
   }
 }

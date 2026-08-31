@@ -6696,6 +6696,9 @@
     "Versions": "版本",
     "View the complete details for this task": "查看此任務的完整詳情",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "關閉後，所有上傳的自訂外掛都會被忽略，每個平台均回復使用內建的出廠外掛。",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "關閉後，整個任務外掛系統停止服務，包括出廠外掛與自訂外掛。"
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "關閉後，整個任務外掛系統停止服務，包括出廠外掛與自訂外掛。",
+    "Updates with the system": "隨系統更新",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "內建版本為 v{{factory}}；刪除自訂版本即可恢復",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "已儲存偏好為{{pref}}，目前無生效訂閱，請求將被拒絕"
   }
 }

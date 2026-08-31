@@ -6696,6 +6696,9 @@
     "Versions": "Phiên bản",
     "View the complete details for this task": "Xem đầy đủ chi tiết của tác vụ này",
     "When disabled, all uploaded custom plugins are ignored and every platform falls back to its built-in factory plugin.": "Khi tắt, mọi plugin tùy chỉnh đã tải lên sẽ bị bỏ qua và mỗi nền tảng sẽ dùng plugin gốc tích hợp sẵn.",
-    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "Khi tắt, toàn bộ hệ thống plugin tác vụ ngừng phục vụ, gồm cả plugin gốc và plugin tùy chỉnh."
+    "When disabled, the entire task plugin system stops serving, including factory and custom plugins.": "Khi tắt, toàn bộ hệ thống plugin tác vụ ngừng phục vụ, gồm cả plugin gốc và plugin tùy chỉnh.",
+    "Updates with the system": "Cập nhật cùng hệ thống",
+    "Built-in is v{{factory}}; delete the custom version to return to it": "Bản tích hợp là v{{factory}}; xóa bản tùy chỉnh để trở lại",
+    "Preference saved as {{pref}}, but no active subscription. Requests will be rejected.": "Tùy chọn đã lưu là {{pref}}, nhưng không có gói đăng ký đang hoạt động. Các yêu cầu sẽ bị từ chối."
   }
 }
