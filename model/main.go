@@ -327,6 +327,9 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	if err := migrateSubscriptionOrderUserSubscriptionLinkSQLite(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -485,6 +488,17 @@ func clickHouseCreateTableHasTTL(createTableSQL string) bool {
 type sqliteColumnDef struct {
 	Name string
 	DDL  string
+}
+
+// migrateSubscriptionOrderUserSubscriptionLinkSQLite adds the nullable link
+// before AutoMigrate because SQLite cannot inline a unique constraint here.
+func migrateSubscriptionOrderUserSubscriptionLinkSQLite() error {
+	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) ||
+		!DB.Migrator().HasTable(&SubscriptionOrder{}) ||
+		DB.Migrator().HasColumn(&SubscriptionOrder{}, "user_subscription_id") {
+		return nil
+	}
+	return DB.Exec("ALTER TABLE `subscription_orders` ADD COLUMN `user_subscription_id` integer").Error
 }
 
 func ensureSubscriptionPlanTableSQLite() error {
