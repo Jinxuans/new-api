@@ -61,14 +61,14 @@ func CalculateInvitationRebateAmount(totalTopUpAmount float64) float64 {
 
 func CalculateInvitationRebateQuota(totalTopUpAmount float64) int {
 	percentage := operation_setting.GetInviteRebatePercentage()
-	if totalTopUpAmount <= 0 || percentage <= 0 || common.QuotaPerUnit <= 0 || operation_setting.USDExchangeRate <= 0 {
+	if totalTopUpAmount <= 0 || percentage <= 0 || common.QuotaPerUnit <= 0 || operation_setting.Price <= 0 {
 		return 0
 	}
 
 	quota, clamp := common.QuotaFromDecimalChecked(decimal.NewFromFloat(totalTopUpAmount).
 		Mul(decimal.NewFromFloat(percentage)).
 		Div(decimal.NewFromInt(100)).
-		Div(decimal.NewFromFloat(operation_setting.USDExchangeRate)).
+		Div(decimal.NewFromFloat(operation_setting.Price)).
 		Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
 	if clamp != nil {
 		return 0

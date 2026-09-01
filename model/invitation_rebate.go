@@ -190,6 +190,7 @@ type invitationRebateCalculation struct {
 	rebateQuota        int
 	cashable           bool
 	usdToCny           float64
+	price              float64
 }
 
 func calculateInvitationRebate(topUp *TopUp, percentage float64) (*invitationRebateCalculation, error) {
@@ -233,33 +234,52 @@ func calculateInvitationRebate(topUp *TopUp, percentage float64) (*invitationReb
 	}
 	calculation.rebateAmountMinor = sourceRebateMinor.IntPart()
 
-	usdToCny := operation_setting.USDExchangeRate
-	if usdToCny <= 0 || math.IsNaN(usdToCny) || math.IsInf(usdToCny, 0) {
-		return calculation, nil
-	}
-	calculation.usdToCny = usdToCny
-
-	var rebateUSD decimal.Decimal
+	var quotaUnits decimal.Decimal
 	switch calculation.paidCurrency {
 	case "CNY":
-		rebateUSD = sourceRebate.Div(decimal.NewFromFloat(usdToCny))
+		price := operation_setting.Price
+		if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			return calculation, nil
+		}
+		calculation.price = price
+		calculation.rebateAmount = decimal.NewFromInt(calculation.rebateAmountMinor).Shift(-2)
+		// The ledger stores cash in minor units. Use that rounded amount as
+		// the source of truth so the quota and cash legs cannot drift.
+		quotaUnits = decimal.NewFromInt(calculation.rebateAmountMinor).
+			Div(decimal.NewFromInt(100)).
+			Div(decimal.NewFromFloat(price))
 		calculation.rebateCurrency = "CNY"
 		calculation.cashable = true
 	case "USD":
-		rebateUSD = sourceRebate
+		usdToCny := operation_setting.USDExchangeRate
+		if usdToCny <= 0 || math.IsNaN(usdToCny) || math.IsInf(usdToCny, 0) {
+			return calculation, nil
+		}
+		price := operation_setting.Price
+		if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			return calculation, nil
+		}
+		calculation.usdToCny = usdToCny
 		calculation.rebateAmount = sourceRebate.Mul(decimal.NewFromFloat(usdToCny))
 		amountMinor := calculation.rebateAmount.Shift(2).Round(0)
 		if amountMinor.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
 			return nil, ErrInvalidVerifiedPayment
 		}
 		calculation.rebateAmountMinor = amountMinor.IntPart()
+		calculation.rebateAmount = decimal.NewFromInt(calculation.rebateAmountMinor).Shift(-2)
+		calculation.price = price
+		quotaUnits = decimal.NewFromInt(calculation.rebateAmountMinor).
+			Div(decimal.NewFromInt(100)).
+			Div(decimal.NewFromFloat(price))
 		calculation.rebateCurrency = "CNY"
 		calculation.cashable = true
 	default:
 		return calculation, nil
 	}
 
-	rebateQuota, err := common.QuotaFromDecimalStrict(rebateUSD.Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
+	// All cash commissions are stored in CNY. Convert the rounded cash amount
+	// back to site balance units using Price before deriving quota.
+	rebateQuota, err := common.QuotaFromDecimalStrict(quotaUnits.Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +306,9 @@ func buildInvitationRebateRuleSnapshot(rebatePercentage float64, quotaPerUnit fl
 		snapshot["cashable"] = calculation.cashable
 		if calculation.usdToCny > 0 {
 			snapshot["usd_exchange_rate"] = calculation.usdToCny
+		}
+		if calculation.price > 0 {
+			snapshot["price"] = calculation.price
 		}
 	}
 	data, err := common.Marshal(snapshot)

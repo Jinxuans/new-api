@@ -94,6 +94,56 @@ func setInvitationRebatePercentageForTest(t *testing.T, percentage float64) {
 	operation_setting.GetPaymentSetting().ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 }
 
+func TestCalculateInvitationRebate_CNYUsesPriceAndRoundedCash(t *testing.T) {
+	oldPrice := operation_setting.Price
+	oldExchangeRate := operation_setting.USDExchangeRate
+	t.Cleanup(func() {
+		operation_setting.Price = oldPrice
+		operation_setting.USDExchangeRate = oldExchangeRate
+	})
+	operation_setting.Price = 1
+	operation_setting.USDExchangeRate = 7.3
+
+	topUp := &TopUp{
+		Money:              10.05,
+		PaidAmountMinor:    1005,
+		PaidCurrency:       "CNY",
+		PaidAmountVerified: true,
+	}
+	calculation, err := calculateInvitationRebate(topUp, 10)
+	require.NoError(t, err)
+	require.NotNil(t, calculation)
+
+	assert.Equal(t, int64(101), calculation.rebateAmountMinor)
+	assert.Equal(t, 505000, calculation.rebateQuota)
+	assert.Equal(t, 1.01, calculation.rebateAmount.InexactFloat64())
+}
+
+func TestCalculateInvitationRebate_USDUsesExchangeRateThenPrice(t *testing.T) {
+	oldPrice := operation_setting.Price
+	oldExchangeRate := operation_setting.USDExchangeRate
+	t.Cleanup(func() {
+		operation_setting.Price = oldPrice
+		operation_setting.USDExchangeRate = oldExchangeRate
+	})
+	operation_setting.Price = 1
+	operation_setting.USDExchangeRate = 7.3
+
+	topUp := &TopUp{
+		Money:              2,
+		PaidAmountMinor:    200,
+		PaidCurrency:       "USD",
+		PaidAmountVerified: true,
+	}
+	calculation, err := calculateInvitationRebate(topUp, 10)
+	require.NoError(t, err)
+	require.NotNil(t, calculation)
+
+	assert.Equal(t, "CNY", calculation.rebateCurrency)
+	assert.Equal(t, int64(146), calculation.rebateAmountMinor)
+	assert.Equal(t, 730000, calculation.rebateQuota)
+}
+
 func getInvitationRebateForTest(t *testing.T, inviterID int) InvitationRebate {
 	t.Helper()
 
