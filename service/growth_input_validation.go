@@ -69,7 +69,7 @@ func addPromotionCommissionLedgerTotals(amountCents int64, quota int64, ledger *
 		return 0, 0, errors.New("promotion commission amount overflow")
 	}
 	ledgerQuota := int64(ledger.QuotaEquivalent)
-	if quota > int64(common.MaxQuota-1)-ledgerQuota {
+	if quota > int64(common.MaxWalletQuota)-ledgerQuota {
 		return 0, 0, model.ErrTopUpQuotaLimitExceeded
 	}
 	return amountCents + ledger.NetAmountCents, quota + ledgerQuota, nil

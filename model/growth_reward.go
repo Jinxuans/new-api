@@ -132,10 +132,10 @@ func CreateSettledGrowthRewardTx(tx *gorm.DB, reward *GrowthReward) error {
 	if reward.RewardQuota <= 0 {
 		return nil
 	}
-	maxCurrentQuota, err := topUpQuotaMaxCurrent(reward.RewardQuota)
-	if err != nil {
-		return err
+	if int64(reward.RewardQuota) > int64(common.MaxWalletQuota) {
+		return ErrTopUpQuotaLimitExceeded
 	}
+	maxCurrentQuota := int64(common.MaxWalletQuota) - int64(reward.RewardQuota)
 	result = tx.Model(&User{}).
 		Where("id = ? AND quota <= ?", reward.UserId, maxCurrentQuota).
 		Update("quota", gorm.Expr("quota + ?", reward.RewardQuota))

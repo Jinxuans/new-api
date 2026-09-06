@@ -1473,16 +1473,16 @@ func TestInvitationMilestoneRewardRemainsPendingWhenInvitationQuotaIsFull(t *tes
 
 	insertInviterAndInviteeForRebateTest(t, 951, 952)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", 951).Updates(map[string]interface{}{
-		"aff_quota":   common.MaxQuota - 100,
-		"aff_history": common.MaxQuota - 100,
+		"aff_quota":   common.MaxWalletQuota - 100,
+		"aff_history": common.MaxWalletQuota - 100,
 	}).Error)
 
 	reward, err := SettleInvitationMilestoneReward(952, InvitationRewardTypeFirstRequest)
 	require.NoError(t, err)
 	assert.Nil(t, reward)
 	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 951)
-	assert.Equal(t, common.MaxQuota-100, affQuota)
-	assert.Equal(t, common.MaxQuota-100, affHistoryQuota)
+	assert.Equal(t, common.MaxWalletQuota-100, affQuota)
+	assert.Equal(t, common.MaxWalletQuota-100, affHistoryQuota)
 	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 951, InvitationRewardTypeFirstRequest))
 	var pending InvitationReward
 	require.NoError(t, DB.Where("invitee_id = ? AND reward_type = ?", 952, InvitationRewardTypeFirstRequest).First(&pending).Error)
@@ -1505,8 +1505,8 @@ func TestRechargeEpayKeepsTopUpWhenFirstTopUpRewardCapacityIsFull(t *testing.T) 
 
 	insertInviterAndInviteeForRebateTest(t, 971, 972)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", 971).Updates(map[string]interface{}{
-		"aff_quota":   common.MaxQuota - 100,
-		"aff_history": common.MaxQuota - 100,
+		"aff_quota":   common.MaxWalletQuota - 100,
+		"aff_history": common.MaxWalletQuota - 100,
 	}).Error)
 	topUp := &TopUp{
 		UserId:          972,
@@ -1529,8 +1529,8 @@ func TestRechargeEpayKeepsTopUpWhenFirstTopUpRewardCapacityIsFull(t *testing.T) 
 	require.NoError(t, DB.Select("quota").Where("id = ?", 972).First(&invitee).Error)
 	assert.Equal(t, 200, invitee.Quota)
 	affQuota, affHistoryQuota := getInvitationQuotaForTest(t, 971)
-	assert.Equal(t, common.MaxQuota-100, affQuota)
-	assert.Equal(t, common.MaxQuota-100, affHistoryQuota)
+	assert.Equal(t, common.MaxWalletQuota-100, affQuota)
+	assert.Equal(t, common.MaxWalletQuota-100, affHistoryQuota)
 	assert.Equal(t, int64(1), getInvitationRewardCountForTest(t, 971, InvitationRewardTypeFirstTopUp))
 	var pending InvitationReward
 	require.NoError(t, DB.Where("invitee_id = ? AND reward_type = ?", 972, InvitationRewardTypeFirstTopUp).First(&pending).Error)

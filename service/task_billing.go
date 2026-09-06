@@ -43,27 +43,27 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 			logContent = fmt.Sprintf("%s, 计算参数：%s", logContent, strings.Join(contents, ", "))
 		}
 	}
-	other := make(map[string]interface{})
-	other["is_task"] = true
-	other["request_path"] = c.Request.URL.Path
-	other["model_price"] = info.PriceData.ModelPrice
+	other := model.NewLogOther()
+	other.SetPublic("is_task", true)
+	other.SetPublic("request_path", c.Request.URL.Path)
+	other.SetPublic("model_price", info.PriceData.ModelPrice)
 	if info.PriceData.ModelRatio > 0 {
-		other["model_ratio"] = info.PriceData.ModelRatio
+		other.SetPublic("model_ratio", info.PriceData.ModelRatio)
 	}
-	other["group_ratio"] = info.PriceData.GroupRatioInfo.GroupRatio
+	other.SetPublic("group_ratio", info.PriceData.GroupRatioInfo.GroupRatio)
 	if info.PriceData.GroupRatioInfo.HasSpecialRatio {
-		other["user_group_ratio"] = info.PriceData.GroupRatioInfo.GroupSpecialRatio
+		other.SetPublic("user_group_ratio", info.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	}
 	if info.IsModelMapped {
-		other["is_model_mapped"] = true
-		other["upstream_model_name"] = info.UpstreamModelName
+		other.SetPublic("is_model_mapped", true)
+		other.SetPublic("upstream_model_name", info.UpstreamModelName)
 	}
 	if snap := info.TieredBillingSnapshot; snap != nil {
-		other["billing_mode"] = "tiered_expr"
-		other["expr_b64"] = base64.StdEncoding.EncodeToString([]byte(snap.ExprString))
-		other["matched_tier"] = snap.EstimatedTier
+		other.SetPublic("billing_mode", "tiered_expr")
+		other.SetPublic("expr_b64", base64.StdEncoding.EncodeToString([]byte(snap.ExprString)))
+		other.SetPublic("matched_tier", snap.EstimatedTier)
 		if len(snap.UsageFacts) > 0 {
-			other["usage_facts"] = snap.UsageFacts
+			other.SetPublic("usage_facts", snap.UsageFacts)
 		}
 	}
 	appendTaskLogInfo(task, other)
@@ -99,43 +99,45 @@ func resolveTokenKey(ctx context.Context, tokenId int, taskID string) string {
 }
 
 // taskBillingOther 从 task 的 BillingContext 构建日志 Other 字段。
-func taskBillingOther(task *model.Task) map[string]interface{} {
-	other := make(map[string]interface{})
+func taskBillingOther(task *model.Task) *model.LogOther {
+	other := model.NewLogOther()
 	if bc := task.PrivateData.BillingContext; bc != nil {
-		other["model_price"] = bc.ModelPrice
+		other.SetPublic("model_price", bc.ModelPrice)
 		if bc.ModelRatio > 0 {
-			other["model_ratio"] = bc.ModelRatio
+			other.SetPublic("model_ratio", bc.ModelRatio)
 		}
-		other["group_ratio"] = bc.GroupRatio
+		other.SetPublic("group_ratio", bc.GroupRatio)
 		if priceData := taskBillingContextPriceData(bc); priceData != nil {
 			for k, v := range priceData.OtherRatios() {
-				other[k] = v
+				if !other.SetPublic(k, v) {
+					common.SysError("task billing other ratio key rejected: " + k)
+				}
 			}
 		}
 		if snap := bc.TieredSnapshot; snap != nil {
-			other["billing_mode"] = "tiered_expr"
-			other["expr_b64"] = base64.StdEncoding.EncodeToString([]byte(snap.ExprString))
-			other["matched_tier"] = snap.EstimatedTier
+			other.SetPublic("billing_mode", "tiered_expr")
+			other.SetPublic("expr_b64", base64.StdEncoding.EncodeToString([]byte(snap.ExprString)))
+			other.SetPublic("matched_tier", snap.EstimatedTier)
 			if len(snap.UsageFacts) > 0 {
-				other["usage_facts"] = snap.UsageFacts
+				other.SetPublic("usage_facts", snap.UsageFacts)
 			}
 		}
 	}
 	props := task.Properties
 	if props.UpstreamModelName != "" && props.UpstreamModelName != props.OriginModelName {
-		other["is_model_mapped"] = true
-		other["upstream_model_name"] = props.UpstreamModelName
+		other.SetPublic("is_model_mapped", true)
+		other.SetPublic("upstream_model_name", props.UpstreamModelName)
 	}
 	appendTaskLogInfo(task, other)
 	return other
 }
 
-func appendTaskLogInfo(task *model.Task, other map[string]interface{}) {
+func appendTaskLogInfo(task *model.Task, other *model.LogOther) {
 	if task == nil || other == nil {
 		return
 	}
 	if task.TaskID != "" {
-		other["task_id"] = task.TaskID
+		other.SetPublic("task_id", task.TaskID)
 	}
 	if task.PrivateData.Execution != nil {
 		AppendTaskPluginAuditInfo(other, task.PrivateData.Execution.TaskPlugin)
@@ -143,16 +145,11 @@ func appendTaskLogInfo(task *model.Task, other map[string]interface{}) {
 	if task.PrivateData.UpstreamTaskID == "" && task.PrivateData.NodeName == "" {
 		return
 	}
-	rootInfo, ok := other["root_info"].(map[string]interface{})
-	if !ok || rootInfo == nil {
-		rootInfo = map[string]interface{}{}
-		other["root_info"] = rootInfo
-	}
 	if task.PrivateData.UpstreamTaskID != "" {
-		rootInfo["upstream_task_id"] = task.PrivateData.UpstreamTaskID
+		other.SetRoot("upstream_task_id", task.PrivateData.UpstreamTaskID)
 	}
 	if task.PrivateData.NodeName != "" {
-		rootInfo["node_name"] = task.PrivateData.NodeName
+		other.SetRoot("node_name", task.PrivateData.NodeName)
 	}
 }
 
@@ -185,15 +182,15 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	}
 
 	other := taskBillingOther(task)
-	other["task_id"] = task.TaskID
-	other["reason"] = reason
+	other.SetPublic("task_id", task.TaskID)
+	other.SetPublic("reason", reason)
 	operationKey := model.TaskBillingAdjustmentOperationKey(task.ID, quota, 0)
 	// 资金来源、task.quota 与后续 token/用量/日志投影事件在同一个事务
 	// 提交。CAS 成功后即使进程退出，system task 仍可完成所有投影。
 	_, err := model.ApplyTaskQuotaTransitionWithProjection(task.ID, quota, 0, model.TaskBillingProjectionInput{
 		ModelName: taskModelName(task),
 		Group:     task.Group,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 		NodeName:  task.PrivateData.NodeName,
 	})
 	if err != nil {
@@ -236,9 +233,9 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	))
 
 	other := taskBillingOther(task)
-	other["task_id"] = task.TaskID
-	other["pre_consumed_quota"] = preConsumedQuota
-	other["actual_quota"] = actualQuota
+	other.SetPublic("task_id", task.TaskID)
+	other.SetPublic("pre_consumed_quota", preConsumedQuota)
+	other.SetPublic("actual_quota", actualQuota)
 	for _, clamp := range clamps {
 		attachQuotaSaturationToOther(other, clamp)
 	}
@@ -250,7 +247,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		ModelName: taskModelName(task),
 		Group:     task.Group,
 		Content:   reason,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 		NodeName:  task.PrivateData.NodeName,
 	})
 	if err != nil {

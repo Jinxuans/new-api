@@ -173,7 +173,7 @@ func TestCashCommissionActionsRejectChangedBalanceAfterConfirmation(t *testing.T
 
 func TestTransferAllSettledPromotionCommissionsToQuotaRejectsWalletOverflow(t *testing.T) {
 	truncate(t)
-	seedUser(t, 3004, common.MaxQuota-100)
+	seedUser(t, 3004, int(common.MaxWalletQuota)-100)
 	ledger := seedPromotionCommissionLedger(t, 3004, 1000, 500)
 
 	_, err := TransferAllSettledPromotionCommissionsToQuota(3004, promotionCommissionBalanceExpectation(t, 3004))
@@ -181,7 +181,7 @@ func TestTransferAllSettledPromotionCommissionsToQuotaRejectsWalletOverflow(t *t
 
 	var user model.User
 	require.NoError(t, model.DB.Select("quota").Where("id = ?", 3004).First(&user).Error)
-	assert.Equal(t, common.MaxQuota-100, user.Quota)
+	assert.Equal(t, int(common.MaxWalletQuota)-100, user.Quota)
 	require.NoError(t, model.DB.Select("status").Where("id = ?", ledger.Id).First(ledger).Error)
 	assert.Equal(t, model.PromotionCommissionStatusSettled, ledger.Status)
 }

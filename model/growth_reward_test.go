@@ -78,7 +78,7 @@ func TestReserveGrowthRewardBudgetTx_FirstRowIncludesExistingIssuedRewards(t *te
 
 func TestCreateSettledGrowthRewardTx_RejectsWalletOverflow(t *testing.T) {
 	truncateTables(t)
-	user := &User{Id: 3202, Username: "growth_wallet_limit", Status: common.UserStatusEnabled, Quota: common.MaxQuota - 10}
+	user := &User{Id: 3202, Username: "growth_wallet_limit", Status: common.UserStatusEnabled, Quota: common.MaxWalletQuota - 10}
 	require.NoError(t, DB.Create(user).Error)
 	reward := NewSettledGrowthReward(user.Id, GrowthRewardItemFirstAPIRequest, 20, 0, "")
 
@@ -89,7 +89,7 @@ func TestCreateSettledGrowthRewardTx_RejectsWalletOverflow(t *testing.T) {
 
 	var reloaded User
 	require.NoError(t, DB.Select("quota").Where("id = ?", user.Id).First(&reloaded).Error)
-	assert.Equal(t, common.MaxQuota-10, reloaded.Quota)
+	assert.Equal(t, common.MaxWalletQuota-10, reloaded.Quota)
 	var rewardCount int64
 	require.NoError(t, DB.Model(&GrowthReward{}).Where("user_id = ?", user.Id).Count(&rewardCount).Error)
 	assert.Zero(t, rewardCount)

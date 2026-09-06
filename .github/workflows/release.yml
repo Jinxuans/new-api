@@ -24,8 +24,8 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            VERSION="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
           else
             VERSION=$(cat VERSION)
           fi
@@ -79,8 +79,8 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            VERSION="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
           else
             VERSION=$(cat VERSION)
           fi
@@ -133,8 +133,8 @@ jobs:
           fetch-depth: 0
       - name: Determine Version
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            VERSION="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
           else
             VERSION=$(cat VERSION)
           fi

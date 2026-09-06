@@ -243,13 +243,13 @@ func addInvitationRewardQuotaTx(tx *gorm.DB, userId int, rewardQuota int, increm
 	if tx == nil {
 		return false, errors.New("transaction is required")
 	}
-	if userId <= 0 || rewardQuota < 0 || rewardQuota >= common.MaxQuota {
+	if userId <= 0 || rewardQuota < 0 || int64(rewardQuota) > int64(common.MaxWalletQuota) {
 		return false, ErrInvitationRewardQuotaLimitExceeded
 	}
 	updates := map[string]interface{}{}
 	query := tx.Model(&User{}).Where("id = ?", userId)
 	if rewardQuota > 0 {
-		maxCurrentQuota := common.MaxQuota - 1 - rewardQuota
+		maxCurrentQuota := int64(common.MaxWalletQuota) - int64(rewardQuota)
 		query = query.Where("aff_quota <= ? AND aff_history <= ?", maxCurrentQuota, maxCurrentQuota)
 		updates["aff_quota"] = gorm.Expr("aff_quota + ?", rewardQuota)
 		updates["aff_history"] = gorm.Expr("aff_history + ?", rewardQuota)

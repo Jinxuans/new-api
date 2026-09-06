@@ -321,8 +321,8 @@ func validateAdminGrowthRewardItem(item *model.GrowthRewardItem, capabilities Ad
 	if capabilities.Introduction && utf8.RuneCountInString(item.Introduction) > maxGrowthRewardItemIntroductionLength {
 		return fmt.Errorf("reward item introduction cannot exceed %d characters", maxGrowthRewardItemIntroductionLength)
 	}
-	if capabilities.RewardOverride && (item.RewardQuota < 0 || item.RewardQuota > common.MaxQuota) {
-		return fmt.Errorf("reward quota must be between 0 and %d", common.MaxQuota)
+	if capabilities.RewardOverride && (item.RewardQuota < 0 || int64(item.RewardQuota) > int64(common.MaxWalletQuota)) {
+		return fmt.Errorf("reward quota must be between 0 and %d", common.MaxWalletQuota)
 	}
 	if capabilities.DailyLimit && (item.DailyLimit < 0 || item.DailyLimit > maxGrowthRewardItemDailyLimit) {
 		return fmt.Errorf("daily limit must be between 0 and %d", maxGrowthRewardItemDailyLimit)

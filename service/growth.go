@@ -227,6 +227,11 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int, expected Promotio
 		if transferredAmountCents != expected.AmountCents || transferredQuotaTotal != expected.QuotaEquivalent {
 			return ErrPromotionCommissionBalanceChanged
 		}
+		// Promotion credits are wallet funds, so they use the wallet ceiling
+		// rather than the int32 single-request billing ceiling.
+		if transferredQuotaTotal <= 0 || transferredQuotaTotal > int64(common.MaxWalletQuota) {
+			return model.ErrTopUpQuotaLimitExceeded
+		}
 		transferredQuota = int(transferredQuotaTotal)
 		now := common.GetTimestamp()
 		res := tx.Model(&model.PromotionCommissionLedger{}).
@@ -248,7 +253,7 @@ func TransferAllSettledPromotionCommissionsToQuota(userId int, expected Promotio
 		if err := tx.Select("quota").Where("id = ?", userId).First(&wallet).Error; err != nil {
 			return err
 		}
-		maxCurrentQuota := common.MaxQuota - 1 - transferredQuota
+		maxCurrentQuota := int64(common.MaxWalletQuota) - transferredQuotaTotal
 		walletUpdate := tx.Model(&model.User{}).
 			Where("id = ? AND quota <= ?", userId, maxCurrentQuota).
 			Update("quota", gorm.Expr("quota + ?", transferredQuota))
